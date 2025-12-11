@@ -1,7 +1,8 @@
 import streamlit as st
 import pandas as pd
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
+import time
 
 # --------------------------------------------------
 # CONFIG
@@ -10,6 +11,40 @@ from datetime import datetime, timedelta
 st.set_page_config(
     page_title="Crest League Manager v2",
     layout="wide",
+)
+
+# Simple CSS to make scoreboard/timer big and bold
+st.markdown(
+    """
+    <style>
+    .clm-scoreboard {
+        text-align: center;
+        font-size: 48px;
+        font-weight: 800;
+        margin-bottom: 0.25rem;
+    }
+    .clm-team-name {
+        text-align: center;
+        font-size: 24px;
+        font-weight: 600;
+        margin-bottom: 0.25rem;
+    }
+    .clm-timer {
+        text-align: center;
+        font-size: 40px;
+        font-weight: 800;
+        margin-top: 0.5rem;
+        margin-bottom: 0.5rem;
+    }
+    .clm-section-title {
+        font-size: 20px;
+        font-weight: 700;
+        margin-top: 1rem;
+        margin-bottom: 0.5rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
 DATA_DIR = Path("data")
@@ -31,15 +66,49 @@ NON_GAME_CATEGORIES = [
     "Other",
 ]
 
-# Timer presets in minutes
-TIMER_PRESETS = {
-    "No timer": 0,
-    "20:00 (running clock)": 20,
-    "30:00 (running clock)": 30,
-    "40:00 (running clock)": 40,
+# Sport-specific timer presets (label, minutes)
+SPORT_TIMER_PRESETS = {
+    "Basketball": [
+        ("No timer", 0),
+        ("15:00 – running clock", 15),
+        ("20:00 – running clock", 20),
+        ("15:00 – stopped clock", 15),
+        ("20:00 – stopped clock", 20),
+    ],
+    "Softball": [
+        ("No timer (innings)", 0),
+        ("60:00 – time limit", 60),
+    ],
+    "Hockey": [
+        ("No timer", 0),
+        ("30:00 – running clock", 30),
+        ("45:00 – running clock", 45),
+    ],
+    "Soccer": [
+        ("No timer", 0),
+        ("30:00 – running clock", 30),
+        ("40:00 – running clock", 40),
+    ],
+    "Flag Football": [
+        ("No timer", 0),
+        ("40:00 – running clock", 40),
+    ],
+    "Kickball": [
+        ("No timer (innings)", 0),
+        ("45:00 – limit", 45),
+    ],
+    "Euro": [
+        ("No timer", 0),
+        ("30:00 – running clock", 30),
+    ],
+    "Speedball": [
+        ("No timer", 0),
+        ("30:00 – running clock", 30),
+    ],
 }
+DEFAULT_TIMER_PRESETS = [("No timer", 0), ("30:00 – running clock", 30)]
 
-# Sport-specific stat types we support in live mode
+# Sport-specific stat types
 SPORT_STATS = {
     "Basketball": ["points", "assists", "rebounds", "steals", "blocks"],
     "Softball": ["hits", "doubles", "triples", "home_runs", "rbis"],
@@ -50,8 +119,29 @@ SPORT_STATS = {
     "Euro": ["goals", "assists", "saves"],
     "Speedball": ["goals", "assists", "steals"],
 }
-
 SPORT_OPTIONS = list(SPORT_STATS.keys())
+
+# Labels for stat buttons
+STAT_LABELS = {
+    "points": "PTS",
+    "assists": "AST",
+    "rebounds": "REB",
+    "steals": "STL",
+    "blocks": "BLK",
+    "hits": "H",
+    "doubles": "2B",
+    "triples": "3B",
+    "home_runs": "HR",
+    "rbis": "RBI",
+    "goals": "G",
+    "saves": "SV",
+    "tds": "TD",
+    "catches": "REC",
+    "interceptions": "INT",
+    "flags_pulled": "FLAG",
+    "runs": "R",
+    "rbi": "RBI",
+}
 
 
 # --------------------------------------------------
@@ -337,27 +427,32 @@ def reset_live_state(league_key: str):
     st.session_state[key] = {"status": "idle"}
 
 
-def timer_display(start_time_iso: str, minutes: int) -> str:
-    """Return a human-friendly timer string given start time and total minutes."""
-    if not start_time_iso or minutes <= 0:
+def compute_timer_display(live: dict) -> str:
+    """Compute timer text from live state."""
+    minutes = live.get("timer_minutes", 0)
+    if minutes <= 0:
         return "No timer set"
 
-    try:
-        start = datetime.fromisoformat(start_time_iso)
-    except Exception:
-        return "Timer error"
-
-    now = datetime.now()
-    elapsed = now - start
-    elapsed_sec = max(0, int(elapsed.total_seconds()))
     total_sec = minutes * 60
-    remaining_sec = max(0, total_sec - elapsed_sec)
+    offset = int(live.get("timer_offset", 0))
+    running = live.get("timer_running", False)
+    start_iso = live.get("timer_start", "")
 
-    m_rem = remaining_sec // 60
-    s_rem = remaining_sec % 60
+    if running and start_iso:
+        try:
+            start = datetime.fromisoformat(start_iso)
+            now = datetime.now()
+            offset = offset + max(0, int((now - start).total_seconds()))
+        except Exception:
+            pass
 
-    m_el = min(elapsed_sec, total_sec) // 60
-    s_el = min(elapsed_sec, total_sec) % 60
+    elapsed = max(0, min(offset, total_sec))
+    remaining = max(0, total_sec - elapsed)
+
+    m_el = elapsed // 60
+    s_el = elapsed % 60
+    m_rem = remaining // 60
+    s_rem = remaining % 60
 
     return f"Elapsed: {m_el:02d}:{s_el:02d}  |  Remaining: {m_rem:02d}:{s_rem:02d}"
 
@@ -428,14 +523,20 @@ def page_post_game_entry(league_key: str, league_name: str):
     with col2:
         sport = st.text_input("Sport (e.g., A Hoop, B Softball)")
     with col3:
-        level = st.text_input("Level (optional)", value="")
+        level = st.selectbox(
+            "Level (A/B/C/D)",
+            ["A", "B", "C", "D"],
+            key=f"pg_level_{league_key}",
+        )
 
     col4, col5 = st.columns(2)
     with col4:
         team_a = st.selectbox("Team A", teams, key=f"{league_key}_pg_team_a")
         score_a = st.number_input("Score A", min_value=0, step=1, value=0)
     with col5:
-        team_b = st.selectbox("Team B", [t for t in teams if t != team_a], key=f"{league_key}_pg_team_b")
+        team_b = st.selectbox(
+            "Team B", [t for t in teams if t != team_a], key=f"{league_key}_pg_team_b"
+        )
         score_b = st.number_input("Score B", min_value=0, step=1, value=0)
 
     st.caption(
@@ -494,7 +595,7 @@ def page_live_game(league_key: str, league_name: str):
 
     live = get_live_state(league_key)
 
-    # If no game in progress: setup form
+    # ------------ NO GAME IN PROGRESS: SETUP ------------
     if live.get("status", "idle") != "in_progress":
         st.subheader("Start New Live Game")
 
@@ -508,23 +609,33 @@ def page_live_game(league_key: str, league_name: str):
                 key=f"lg_sport_{league_key}",
             )
         with col3:
-            level = st.text_input("Level (e.g., A, B, C, D)", value="", key=f"lg_level_{league_key}")
+            level = st.selectbox(
+                "Level (A/B/C/D)",
+                ["A", "B", "C", "D"],
+                key=f"lg_level_{league_key}",
+            )
 
         col4, col5 = st.columns(2)
         with col4:
             team_a = st.selectbox("Team A", teams, key=f"lg_team_a_{league_key}")
         with col5:
-            team_b = st.selectbox("Team B", [t for t in teams if t != team_a], key=f"lg_team_b_{league_key}")
+            team_b = st.selectbox(
+                "Team B", [t for t in teams if t != team_a], key=f"lg_team_b_{league_key}"
+            )
 
+        # Timer options based on sport
+        presets = SPORT_TIMER_PRESETS.get(sport, DEFAULT_TIMER_PRESETS)
+        preset_labels = [p[0] for p in presets]
         timer_label = st.selectbox(
             "Timer preset",
-            list(TIMER_PRESETS.keys()),
+            preset_labels,
             key=f"lg_timer_{league_key}",
         )
-        timer_minutes = TIMER_PRESETS[timer_label]
+        timer_minutes = dict(presets)[timer_label]
 
-        # Select active players for this specific game
-        st.markdown("### Active Lineups for This Game")
+        # Active lineups
+        st.markdown("<div class='clm-section-title'>Active Lineups for This Game</div>",
+                    unsafe_allow_html=True)
 
         roster_a = roster[roster["team_name"] == team_a].copy()
         roster_b = roster[roster["team_name"] == team_b].copy()
@@ -586,16 +697,18 @@ def page_live_game(league_key: str, league_name: str):
             live["score_a"] = 0
             live["score_b"] = 0
             live["timer_minutes"] = timer_minutes
-            live["timer_start"] = datetime.now().isoformat() if timer_minutes > 0 else ""
+            live["timer_start"] = ""  # will be set when user hits Start
+            live["timer_offset"] = 0
+            live["timer_running"] = False
             live["players"] = players
             live["stat_fields"] = stat_fields
 
-            st.success("Live game started.")
+            st.success("Live game started. Use the scoreboard below to track the game.")
             st.rerun()
 
         return
 
-    # Else: game in progress
+    # ------------ GAME IN PROGRESS ------------
     st.subheader("Live Game In Progress")
 
     # Game summary
@@ -607,35 +720,114 @@ def page_live_game(league_key: str, league_name: str):
         st.markdown(f"**Teams:** {live.get('team_a', '')} vs {live.get('team_b', '')}")
         st.markdown(f"**Date:** {live.get('date', '')}")
     with col_info2:
-        tm = live.get("timer_minutes", 0)
-        ts = live.get("timer_start", "")
-        st.markdown("**Timer**")
-        st.code(timer_display(ts, tm))
+        st.markdown("<div class='clm-section-title'>Timer</div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div class='clm-timer'>{compute_timer_display(live)}</div>",
+            unsafe_allow_html=True,
+        )
+        col_t1, col_t2, col_t3 = st.columns(3)
+        with col_t1:
+            if st.button("Start / Resume", key=f"timer_start_{league_key}"):
+                if live.get("timer_minutes", 0) > 0:
+                    # If already running, do nothing; else start from now
+                    if not live.get("timer_running", False):
+                        live["timer_running"] = True
+                        live["timer_start"] = datetime.now().isoformat()
+                        st.rerun()
+        with col_t2:
+            if st.button("Pause", key=f"timer_pause_{league_key}"):
+                if live.get("timer_minutes", 0) > 0 and live.get("timer_running", False):
+                    try:
+                        start = datetime.fromisoformat(live.get("timer_start", ""))
+                        now = datetime.now()
+                        delta_sec = max(0, int((now - start).total_seconds()))
+                    except Exception:
+                        delta_sec = 0
+                    live["timer_offset"] = int(live.get("timer_offset", 0)) + delta_sec
+                    live["timer_running"] = False
+                    live["timer_start"] = ""
+                    st.rerun()
+        with col_t3:
+            if st.button("Reset", key=f"timer_reset_{league_key}"):
+                live["timer_offset"] = 0
+                live["timer_running"] = False
+                live["timer_start"] = ""
+                st.rerun()
 
     st.markdown("---")
 
-    # Scoreboard
-    col_sa, col_sb = st.columns(2)
+    # Big SCOREBOARD
+    team_a = live.get("team_a", "")
+    team_b = live.get("team_b", "")
+    score_a = int(live.get("score_a", 0))
+    score_b = int(live.get("score_b", 0))
+    sport = live.get("sport", "")
+
+    col_sa, col_timer_mid, col_sb = st.columns([3, 2, 3])
+
     with col_sa:
-        st.markdown(f"### {live.get('team_a', '')} – Score: {live.get('score_a', 0)}")
-        if st.button("+1 for Team A", key=f"lg_score_a_plus_{league_key}"):
-            live["score_a"] = live.get("score_a", 0) + 1
-            st.rerun()
-        if st.button("-1 for Team A", key=f"lg_score_a_minus_{league_key}"):
-            live["score_a"] = max(0, live.get("score_a", 0) - 1)
-            st.rerun()
+        st.markdown(f"<div class='clm-team-name'>{team_a}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='clm-scoreboard'>{score_a}</div>", unsafe_allow_html=True)
+
+        # Team A scoring buttons
+        if sport == "Basketball":
+            b1, b2, b3, b4 = st.columns(4)
+            if b1.button("+1", key=f"lg_score_a_plus1_{league_key}"):
+                live["score_a"] = score_a + 1
+                st.rerun()
+            if b2.button("+2", key=f"lg_score_a_plus2_{league_key}"):
+                live["score_a"] = score_a + 2
+                st.rerun()
+            if b3.button("+3", key=f"lg_score_a_plus3_{league_key}"):
+                live["score_a"] = score_a + 3
+                st.rerun()
+            if b4.button("-1", key=f"lg_score_a_minus1_{league_key}"):
+                live["score_a"] = max(0, score_a - 1)
+                st.rerun()
+        else:
+            b1, b2 = st.columns(2)
+            if b1.button("+1", key=f"lg_score_a_plus_{league_key}"):
+                live["score_a"] = score_a + 1
+                st.rerun()
+            if b2.button("-1", key=f"lg_score_a_minus_{league_key}"):
+                live["score_a"] = max(0, score_a - 1)
+                st.rerun()
+
+    with col_timer_mid:
+        # Timer already shown above; just leave empty here or add label
+        st.markdown("<div style='height:2rem;'></div>", unsafe_allow_html=True)
+
     with col_sb:
-        st.markdown(f"### {live.get('team_b', '')} – Score: {live.get('score_b', 0)}")
-        if st.button("+1 for Team B", key=f"lg_score_b_plus_{league_key}"):
-            live["score_b"] = live.get("score_b", 0) + 1
-            st.rerun()
-        if st.button("-1 for Team B", key=f"lg_score_b_minus_{league_key}"):
-            live["score_b"] = max(0, live.get("score_b", 0) - 1)
-            st.rerun()
+        st.markdown(f"<div class='clm-team-name'>{team_b}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='clm-scoreboard'>{score_b}</div>", unsafe_allow_html=True)
+
+        # Team B scoring buttons
+        if sport == "Basketball":
+            b1, b2, b3, b4 = st.columns(4)
+            if b1.button("+1 ", key=f"lg_score_b_plus1_{league_key}"):
+                live["score_b"] = score_b + 1
+                st.rerun()
+            if b2.button("+2 ", key=f"lg_score_b_plus2_{league_key}"):
+                live["score_b"] = score_b + 2
+                st.rerun()
+            if b3.button("+3 ", key=f"lg_score_b_plus3_{league_key}"):
+                live["score_b"] = score_b + 3
+                st.rerun()
+            if b4.button("-1 ", key=f"lg_score_b_minus1_{league_key}"):
+                live["score_b"] = max(0, score_b - 1)
+                st.rerun()
+        else:
+            b1, b2 = st.columns(2)
+            if b1.button("+1 ", key=f"lg_score_b_plus_{league_key}"):
+                live["score_b"] = score_b + 1
+                st.rerun()
+            if b2.button("-1 ", key=f"lg_score_b_minus_{league_key}"):
+                live["score_b"] = max(0, score_b - 1)
+                st.rerun()
 
     st.markdown("---")
 
-    # Current stats table
+    # Current stats table + per-player controls
     players = live.get("players", [])
     stat_fields = live.get("stat_fields", [])
 
@@ -643,38 +835,65 @@ def page_live_game(league_key: str, league_name: str):
         st.warning("No active players or stat fields set for this game.")
     else:
         df_players = pd.DataFrame(players)
-        st.subheader("Current Player Stats (This Game)")
 
-        # Show separate tables for each team
-        team_a = live.get("team_a", "")
-        team_b = live.get("team_b", "")
+        st.markdown("<div class='clm-section-title'>Current Player Stats (This Game)</div>",
+                    unsafe_allow_html=True)
 
+        # Show & control players by team
         col_ta, col_tb = st.columns(2)
+
         with col_ta:
             st.markdown(f"#### {team_a}")
             df_a = df_players[df_players["team_name"] == team_a].copy()
-            if not df_a.empty:
-                st.dataframe(
-                    df_a[["player_name"] + stat_fields],
-                    use_container_width=True,
-                )
-            else:
+            if df_a.empty:
                 st.info("No active players on this team.")
+            else:
+                for idx, row in df_a.iterrows():
+                    p_name = row["player_name"]
+                    st.write(f"**{p_name}**")
+                    cols_row = st.columns(len(stat_fields))
+                    for j, sf in enumerate(stat_fields):
+                        label = STAT_LABELS.get(sf, sf.replace("_", " ").title())
+                        if cols_row[j].button(
+                            f"+1 {label}",
+                            key=f"{league_key}_A_{idx}_{sf}_plus",
+                        ):
+                            # Update in live state
+                            for p in players:
+                                if p["player_name"] == p_name and p["team_name"] == team_a:
+                                    p[sf] = p.get(sf, 0) + 1
+                                    break
+                            live["players"] = players
+                            st.rerun()
+
         with col_tb:
             st.markdown(f"#### {team_b}")
             df_b = df_players[df_players["team_name"] == team_b].copy()
-            if not df_b.empty:
-                st.dataframe(
-                    df_b[["player_name"] + stat_fields],
-                    use_container_width=True,
-                )
-            else:
+            if df_b.empty:
                 st.info("No active players on this team.")
+            else:
+                for idx, row in df_b.iterrows():
+                    p_name = row["player_name"]
+                    st.write(f"**{p_name}**")
+                    cols_row = st.columns(len(stat_fields))
+                    for j, sf in enumerate(stat_fields):
+                        label = STAT_LABELS.get(sf, sf.replace("_", " ").title())
+                        if cols_row[j].button(
+                            f"+1 {label}",
+                            key=f"{league_key}_B_{idx}_{sf}_plus",
+                        ):
+                            for p in players:
+                                if p["player_name"] == p_name and p["team_name"] == team_b:
+                                    p[sf] = p.get(sf, 0) + 1
+                                    break
+                            live["players"] = players
+                            st.rerun()
 
         st.markdown("---")
 
-        # Adjust which players are active (remove from game)
-        st.subheader("Adjust Active Lineup (Remove or Add Players)")
+        # Adjust active lineup if needed (remove players mid-game)
+        st.markdown("<div class='clm-section-title'>Adjust Active Lineup</div>",
+                    unsafe_allow_html=True)
 
         all_names = df_players["player_name"].tolist()
         current_keep = st.multiselect(
@@ -690,55 +909,6 @@ def page_live_game(league_key: str, league_name: str):
             st.success("Lineup updated for this game.")
             st.rerun()
 
-        st.markdown("---")
-
-        # Live stat entry controls
-        st.subheader("Update Stats (Live)")
-
-        # Choose team, player, stat_type
-        col_sel1, col_sel2, col_sel3 = st.columns(3)
-        with col_sel1:
-            team_choice = st.selectbox(
-                "Team",
-                [team_a, team_b],
-                key=f"lg_stat_team_{league_key}",
-            )
-        with col_sel2:
-            available_players = [
-                p["player_name"] for p in players if p["team_name"] == team_choice
-            ]
-            player_choice = st.selectbox(
-                "Player",
-                available_players if available_players else ["(none)"],
-                key=f"lg_stat_player_{league_key}",
-            )
-        with col_sel3:
-            stat_choice = st.selectbox(
-                "Stat",
-                stat_fields if stat_fields else ["(none)"],
-                key=f"lg_stat_type_{league_key}",
-            )
-
-        col_btn1, col_btn2 = st.columns(2)
-        with col_btn1:
-            if st.button("+1 to this stat", key=f"lg_stat_plus_{league_key}"):
-                if player_choice and player_choice != "(none)" and stat_choice and stat_choice != "(none)":
-                    for p in players:
-                        if p["player_name"] == player_choice and p["team_name"] == team_choice:
-                            p[stat_choice] = p.get(stat_choice, 0) + 1
-                            break
-                    live["players"] = players
-                    st.rerun()
-        with col_btn2:
-            if st.button("-1 from this stat", key=f"lg_stat_minus_{league_key}"):
-                if player_choice and player_choice != "(none)" and stat_choice and stat_choice != "(none)":
-                    for p in players:
-                        if p["player_name"] == player_choice and p["team_name"] == team_choice:
-                            p[stat_choice] = max(0, p.get(stat_choice, 0) - 1)
-                            break
-                    live["players"] = players
-                    st.rerun()
-
     st.markdown("---")
 
     # Finalize or cancel game
@@ -752,11 +922,11 @@ def page_live_game(league_key: str, league_name: str):
             new_game_id = 1 if games.empty else int(games["game_id"].max()) + 1
 
             # Compute game points (simple 2/1/0 rule)
-            score_a = int(live.get("score_a", 0))
-            score_b = int(live.get("score_b", 0))
-            if score_a > score_b:
+            score_a_final = int(live.get("score_a", 0))
+            score_b_final = int(live.get("score_b", 0))
+            if score_a_final > score_b_final:
                 points_a, points_b = 2, 0
-            elif score_a < score_b:
+            elif score_a_final < score_b_final:
                 points_a, points_b = 0, 2
             else:
                 points_a = points_b = 1
@@ -769,8 +939,8 @@ def page_live_game(league_key: str, league_name: str):
                 "level": live.get("level", ""),
                 "team_a": live.get("team_a", ""),
                 "team_b": live.get("team_b", ""),
-                "score_a": score_a,
-                "score_b": score_b,
+                "score_a": score_a_final,
+                "score_b": score_b_final,
                 "points_a": points_a,
                 "points_b": points_b,
             }
@@ -812,6 +982,11 @@ def page_live_game(league_key: str, league_name: str):
             reset_live_state(league_key)
             st.warning("Live game discarded (no data saved).")
             st.rerun()
+
+    # Auto-refresh while timer running (for live ticking)
+    if live.get("timer_running", False) and live.get("timer_minutes", 0) > 0:
+        time.sleep(1)
+        st.rerun()
 
 
 def page_standings(league_name: str):
