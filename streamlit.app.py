@@ -5,7 +5,7 @@ from datetime import datetime
 import time
 
 # --------------------------------------------------
-# CONFIG
+# CONFIG & STYLING
 # --------------------------------------------------
 
 st.set_page_config(
@@ -42,6 +42,11 @@ st.markdown(
         margin-top: 1rem;
         margin-bottom: 0.5rem;
     }
+    .clm-flash {
+        color: green;
+        font-size: 12px;
+        margin-left: 0.5rem;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -70,40 +75,48 @@ NON_GAME_CATEGORIES = [
 SPORT_TIMER_PRESETS = {
     "Basketball": [
         ("No timer", 0),
-        ("15:00 – running clock", 15),
-        ("20:00 – running clock", 20),
-        ("15:00 – stopped clock", 15),
-        ("20:00 – stopped clock", 20),
+        ("15:00 – per half (running)", 15),
+        ("20:00 – per half (running)", 20),
+        ("15:00 – per half (stopped)", 15),
+        ("20:00 – per half (stopped)", 20),
+        ("30:00 – full game (running)", 30),
     ],
     "Softball": [
         ("No timer (innings)", 0),
         ("60:00 – time limit", 60),
+        ("75:00 – time limit", 75),
     ],
     "Hockey": [
         ("No timer", 0),
-        ("30:00 – running clock", 30),
-        ("45:00 – running clock", 45),
+        ("12:00 – per period", 12),
+        ("15:00 – per period", 15),
+        ("45:00 – full game", 45),
     ],
     "Soccer": [
         ("No timer", 0),
-        ("30:00 – running clock", 30),
-        ("40:00 – running clock", 40),
+        ("25:00 – per half (running)", 25),
+        ("30:00 – per half (running)", 30),
+        ("50:00 – full game", 50),
     ],
     "Flag Football": [
         ("No timer", 0),
-        ("40:00 – running clock", 40),
+        ("20:00 – per half (running)", 20),
+        ("40:00 – full game", 40),
     ],
     "Kickball": [
         ("No timer (innings)", 0),
-        ("45:00 – limit", 45),
+        ("45:00 – time limit", 45),
+        ("60:00 – time limit", 60),
     ],
     "Euro": [
         ("No timer", 0),
-        ("30:00 – running clock", 30),
+        ("20:00 – per half (running)", 20),
+        ("40:00 – full game", 40),
     ],
     "Speedball": [
         ("No timer", 0),
-        ("30:00 – running clock", 30),
+        ("20:00 – per half (running)", 20),
+        ("40:00 – full game", 40),
     ],
 }
 DEFAULT_TIMER_PRESETS = [("No timer", 0), ("30:00 – running clock", 30)]
@@ -143,6 +156,40 @@ STAT_LABELS = {
     "rbi": "RBI",
 }
 
+# Base game point values by league_key -> sport -> level
+# Senior A Softball = 50; everything else scaled reasonably.
+GAME_POINT_VALUES = {
+    "senior": {
+        "Softball": {"A": 50, "B": 45, "C": 40, "D": 35},
+        "Flag Football": {"A": 40, "B": 35, "C": 30, "D": 25},
+        "Basketball": {"A": 35, "B": 30, "C": 25, "D": 20},
+        "Hockey": {"A": 35, "B": 30, "C": 25, "D": 20},
+        "Soccer": {"A": 30, "B": 25, "C": 20, "D": 15},
+        "Euro": {"A": 30, "B": 25, "C": 20, "D": 15},
+        "Speedball": {"A": 30, "B": 25, "C": 20, "D": 15},
+        "Kickball": {"A": 25, "B": 20, "C": 15, "D": 10},
+    },
+    "junior": {
+        "Softball": {"A": 45, "B": 40, "C": 35, "D": 30},
+        "Flag Football": {"A": 35, "B": 30, "C": 25, "D": 20},
+        "Basketball": {"A": 30, "B": 25, "C": 20, "D": 15},
+        "Hockey": {"A": 30, "B": 25, "C": 20, "D": 15},
+        "Soccer": {"A": 25, "B": 20, "C": 15, "D": 10},
+        "Euro": {"A": 25, "B": 20, "C": 15, "D": 10},
+        "Speedball": {"A": 25, "B": 20, "C": 15, "D": 10},
+        "Kickball": {"A": 20, "B": 15, "C": 10, "D": 5},
+    },
+    "soph": {
+        "Softball": {"A": 35, "B": 30, "C": 25, "D": 20},  # per your note
+        "Flag Football": {"A": 30, "B": 25, "C": 20, "D": 15},
+        "Basketball": {"A": 25, "B": 20, "C": 15, "D": 10},
+        "Hockey": {"A": 25, "B": 20, "C": 15, "D": 10},
+        "Soccer": {"A": 20, "B": 15, "C": 10, "D": 5},
+        "Euro": {"A": 20, "B": 15, "C": 10, "D": 5},
+        "Speedball": {"A": 20, "B": 15, "C": 10, "D": 5},
+        "Kickball": {"A": 15, "B": 10, "C": 5, "D": 5},
+    },
+}
 
 # --------------------------------------------------
 # HELPERS: PATHS / IO
@@ -219,8 +266,11 @@ def get_games(league_key: str) -> pd.DataFrame:
         "league_key",
         "sport",
         "level",
+        "match_type",  # "1v1" or "2v2"
         "team_a",
+        "team_a2",
         "team_b",
+        "team_b2",
         "score_a",
         "score_b",
         "points_a",
@@ -268,13 +318,41 @@ def save_non_game_points(league_key: str, df: pd.DataFrame):
 
 def get_highlights(league_key: str) -> pd.DataFrame:
     p = league_paths(league_key)["highlights"]
-    cols = ["id", "date", "title", "description", "file_name"]
+    cols = ["id", "date", "title", "description", "file_path", "file_name"]
     return read_csv_safe(p, cols)
 
 
 def save_highlights(league_key: str, df: pd.DataFrame):
     p = league_paths(league_key)["highlights"]
     write_csv_safe(df, p)
+
+
+# --------------------------------------------------
+# GAME POINT LOGIC
+# --------------------------------------------------
+
+
+def get_base_points_for_game(league_key: str, sport: str, level: str) -> float:
+    league_map = GAME_POINT_VALUES.get(league_key, {})
+    sport_map = league_map.get(sport, {})
+    base = sport_map.get(level)
+    if base is None:
+        # fallback if something not configured
+        return 10.0
+    return float(base)
+
+
+def assign_points_for_result(
+    league_key: str, sport: str, level: str, score_a: int, score_b: int
+) -> tuple[float, float]:
+    base = get_base_points_for_game(league_key, sport, level)
+    if score_a > score_b:
+        return base, 0.0
+    elif score_b > score_a:
+        return 0.0, base
+    else:
+        # Tie: split points
+        return base / 2.0, base / 2.0
 
 
 # --------------------------------------------------
@@ -285,58 +363,96 @@ def save_highlights(league_key: str, df: pd.DataFrame):
 def calc_team_standings(
     league_key: str, include_non_game: bool = True
 ) -> pd.DataFrame:
-    """Return a standings table for one league (no age weighting)."""
+    """Return a standings table for one league (no age weighting). Handles 1v1 and 2v2."""
     games = get_games(league_key)
     non_game = get_non_game_points(league_key)
 
+    roster = get_roster(league_key)
+    roster_teams = sorted(roster["team_name"].dropna().unique().tolist())
+
     if games.empty:
-        teams = sorted(get_roster(league_key)["team_name"].dropna().unique().tolist())
         return pd.DataFrame(
             {
-                "Team": teams,
+                "Team": roster_teams,
                 "Wins": 0,
                 "Losses": 0,
                 "Ties": 0,
-                "Game Points": 0,
-                "Non-Game Points": 0,
-                "Total Points": 0,
+                "Game Points": 0.0,
+                "Non-Game Points": 0.0,
+                "Total Points": 0.0,
             }
         )
 
+    # Ensure numeric
     games["score_a"] = pd.to_numeric(games["score_a"], errors="coerce").fillna(0)
     games["score_b"] = pd.to_numeric(games["score_b"], errors="coerce").fillna(0)
-    games["points_a"] = pd.to_numeric(games["points_a"], errors="coerce").fillna(0)
-    games["points_b"] = pd.to_numeric(games["points_b"], errors="coerce").fillna(0)
+    games["points_a"] = pd.to_numeric(games["points_a"], errors="coerce").fillna(0.0)
+    games["points_b"] = pd.to_numeric(games["points_b"], errors="coerce").fillna(0.0)
 
-    teams = set(games["team_a"]).union(set(games["team_b"]))
-    standings = pd.DataFrame({"Team": sorted(t for t in teams if pd.notna(t))})
+    # Collect all teams that have ever appeared
+    teams = set()
+    for col in ["team_a", "team_b", "team_a2", "team_b2"]:
+        teams.update(games[col].dropna().unique().tolist())
+    teams = {t for t in teams if t}  # remove empty strings
 
-    def record_for_team(team):
-        rows_a = games[games["team_a"] == team]
-        rows_b = games[games["team_b"] == team]
+    # Guarantee teams from roster also show up
+    teams.update(roster_teams)
 
-        wins = ((rows_a["score_a"] > rows_a["score_b"]).sum() +
-                (rows_b["score_b"] > rows_b["score_a"]).sum())
-        losses = ((rows_a["score_a"] < rows_a["score_b"]).sum() +
-                  (rows_b["score_b"] < rows_b["score_a"]).sum())
-        ties = ((rows_a["score_a"] == rows_a["score_b"]).sum() +
-                (rows_b["score_b"] == rows_b["score_a"]).sum())
+    wins = {t: 0 for t in teams}
+    losses = {t: 0 for t in teams}
+    ties = {t: 0 for t in teams}
+    game_pts = {t: 0.0 for t in teams}
 
-        game_points = rows_a["points_a"].sum() + rows_b["points_b"].sum()
-        return wins, losses, ties, game_points
+    for _, row in games.iterrows():
+        side_a = [row["team_a"]]
+        if pd.notna(row["team_a2"]) and row["team_a2"]:
+            side_a.append(row["team_a2"])
+        side_b = [row["team_b"]]
+        if pd.notna(row["team_b2"]) and row["team_b2"]:
+            side_b.append(row["team_b2"])
 
-    wins_list, losses_list, ties_list, game_pts_list = [], [], [], []
-    for team in standings["Team"]:
-        w, l, t, gp = record_for_team(team)
-        wins_list.append(w)
-        losses_list.append(l)
-        ties_list.append(t)
-        game_pts_list.append(gp)
+        score_a = int(row["score_a"])
+        score_b = int(row["score_b"])
+        p_a = float(row["points_a"])
+        p_b = float(row["points_b"])
 
-    standings["Wins"] = wins_list
-    standings["Losses"] = losses_list
-    standings["Ties"] = ties_list
-    standings["Game Points"] = game_pts_list
+        if score_a > score_b:
+            for t in side_a:
+                if t:
+                    wins[t] += 1
+                    game_pts[t] += p_a
+            for t in side_b:
+                if t:
+                    losses[t] += 1
+                    game_pts[t] += p_b
+        elif score_b > score_a:
+            for t in side_b:
+                if t:
+                    wins[t] += 1
+                    game_pts[t] += p_b
+            for t in side_a:
+                if t:
+                    losses[t] += 1
+                    game_pts[t] += p_a
+        else:
+            for t in side_a:
+                if t:
+                    ties[t] += 1
+                    game_pts[t] += p_a
+            for t in side_b:
+                if t:
+                    ties[t] += 1
+                    game_pts[t] += p_b
+
+    standings = pd.DataFrame(
+        {
+            "Team": sorted(teams),
+            "Wins": [wins[t] for t in sorted(teams)],
+            "Losses": [losses[t] for t in sorted(teams)],
+            "Ties": [ties[t] for t in sorted(teams)],
+            "Game Points": [game_pts[t] for t in sorted(teams)],
+        }
+    )
 
     # Non-game points
     if not non_game.empty:
@@ -345,9 +461,9 @@ def calc_team_standings(
         non_sum = non_sum.rename(columns={"team_name": "Team", "points": "Non-Game Points"})
         standings = standings.merge(non_sum, on="Team", how="left")
     else:
-        standings["Non-Game Points"] = 0
+        standings["Non-Game Points"] = 0.0
 
-    standings["Non-Game Points"] = standings["Non-Game Points"].fillna(0)
+    standings["Non-Game Points"] = standings["Non-Game Points"].fillna(0.0)
 
     if include_non_game:
         standings["Total Points"] = standings["Game Points"] + standings["Non-Game Points"]
@@ -457,6 +573,29 @@ def compute_timer_display(live: dict) -> str:
     return f"Elapsed: {m_el:02d}:{s_el:02d}  |  Remaining: {m_rem:02d}:{s_rem:02d}"
 
 
+def set_flash_stat(league_key: str, player_name: str, team_name: str, stat_label: str):
+    """Set a short-lived 'flash' confirmation for a stat change."""
+    key = f"flash_{league_key}"
+    st.session_state[key] = {
+        "player_name": player_name,
+        "team_name": team_name,
+        "stat_label": stat_label,
+        "expires_at": time.time() + 1.5,  # ~1–2 seconds
+    }
+
+
+def get_flash_stat(league_key: str):
+    key = f"flash_{league_key}"
+    fs = st.session_state.get(key)
+    if not fs:
+        return None
+    if time.time() > fs.get("expires_at", 0):
+        # expire
+        st.session_state[key] = None
+        return None
+    return fs
+
+
 # --------------------------------------------------
 # PAGES
 # --------------------------------------------------
@@ -517,11 +656,22 @@ def page_post_game_entry(league_key: str, league_name: str):
 
     st.subheader("Game Result (Post-Game)")
 
+    match_type = st.radio(
+        "Game type",
+        ["One team vs one team", "Two teams vs two teams (combined)"],
+        key=f"pg_match_type_{league_key}",
+    )
+    is_2v2 = match_type.startswith("Two teams")
+
     col1, col2, col3 = st.columns(3)
     with col1:
         date = st.date_input("Game date", value=datetime.today())
     with col2:
-        sport = st.text_input("Sport (e.g., A Hoop, B Softball)")
+        sport = st.selectbox(
+            "Sport",
+            SPORT_OPTIONS,
+            key=f"pg_sport_{league_key}",
+        )
     with col3:
         level = st.selectbox(
             "Level (A/B/C/D)",
@@ -529,42 +679,65 @@ def page_post_game_entry(league_key: str, league_name: str):
             key=f"pg_level_{league_key}",
         )
 
-    col4, col5 = st.columns(2)
-    with col4:
-        team_a = st.selectbox("Team A", teams, key=f"{league_key}_pg_team_a")
-        score_a = st.number_input("Score A", min_value=0, step=1, value=0)
-    with col5:
-        team_b = st.selectbox(
-            "Team B", [t for t in teams if t != team_a], key=f"{league_key}_pg_team_b"
-        )
-        score_b = st.number_input("Score B", min_value=0, step=1, value=0)
+    if not is_2v2:
+        col4, col5 = st.columns(2)
+        with col4:
+            team_a = st.selectbox("Team A", teams, key=f"{league_key}_pg_team_a")
+            score_a = st.number_input("Score A", min_value=0, step=1, value=0)
+        with col5:
+            team_b = st.selectbox(
+                "Team B", [t for t in teams if t != team_a], key=f"{league_key}_pg_team_b"
+            )
+            score_b = st.number_input("Score B", min_value=0, step=1, value=0)
+
+        team_a2 = ""
+        team_b2 = ""
+    else:
+        st.caption("Select two teams for each side. Scores are combined for each side.")
+        col4, col5 = st.columns(2)
+        with col4:
+            team_a = st.selectbox("Side A – Team 1", teams, key=f"{league_key}_pg_team_a1")
+            remaining_a = [t for t in teams if t != team_a]
+            team_a2 = st.selectbox("Side A – Team 2", remaining_a, key=f"{league_key}_pg_team_a2")
+        with col5:
+            remaining_for_b = [t for t in teams if t not in [team_a, team_a2]]
+            team_b = st.selectbox("Side B – Team 1", remaining_for_b, key=f"{league_key}_pg_team_b1")
+            remaining_b2 = [t for t in remaining_for_b if t != team_b]
+            team_b2 = st.selectbox(
+                "Side B – Team 2",
+                remaining_b2 if remaining_b2 else remaining_for_b,
+                key=f"{league_key}_pg_team_b2",
+            )
+
+        score_a = st.number_input("Combined Score for Side A", min_value=0, step=1, value=0)
+        score_b = st.number_input("Combined Score for Side B", min_value=0, step=1, value=0)
 
     st.caption(
-        "For now, game points go in automatically: 2 points for a win, 1 for a tie, 0 for a loss. "
-        "We can tweak this table later to match camp rules exactly."
+        "Game points are based on league, sport, and level (e.g., Senior A Softball = 50). "
+        "Winner gets full points; losers get 0; ties split the points."
     )
 
     if st.button("Save Game Result", key=f"save_game_pg_{league_key}"):
         games = get_games(league_key)
-
-        if score_a > score_b:
-            points_a, points_b = 2, 0
-        elif score_a < score_b:
-            points_a, points_b = 0, 2
-        else:
-            points_a = points_b = 1
-
         new_id = 1 if games.empty else int(games["game_id"].max()) + 1
+
+        points_a, points_b = assign_points_for_result(
+            league_key, sport, level, int(score_a), int(score_b)
+        )
+
         new_row = {
             "game_id": new_id,
             "date": date.isoformat(),
             "league_key": league_key,
             "sport": sport,
             "level": level,
+            "match_type": "2v2" if is_2v2 else "1v1",
             "team_a": team_a,
+            "team_a2": team_a2 if is_2v2 else "",
             "team_b": team_b,
-            "score_a": score_a,
-            "score_b": score_b,
+            "team_b2": team_b2 if is_2v2 else "",
+            "score_a": int(score_a),
+            "score_b": int(score_b),
             "points_a": points_a,
             "points_b": points_b,
         }
@@ -599,6 +772,13 @@ def page_live_game(league_key: str, league_name: str):
     if live.get("status", "idle") != "in_progress":
         st.subheader("Start New Live Game")
 
+        match_type = st.radio(
+            "Game type",
+            ["One team vs one team", "Two teams vs two teams (combined)"],
+            key=f"lg_match_type_{league_key}",
+        )
+        is_2v2 = match_type.startswith("Two teams")
+
         col1, col2, col3 = st.columns(3)
         with col1:
             date = st.date_input("Game date", value=datetime.today(), key=f"lg_date_{league_key}")
@@ -615,13 +795,32 @@ def page_live_game(league_key: str, league_name: str):
                 key=f"lg_level_{league_key}",
             )
 
-        col4, col5 = st.columns(2)
-        with col4:
-            team_a = st.selectbox("Team A", teams, key=f"lg_team_a_{league_key}")
-        with col5:
-            team_b = st.selectbox(
-                "Team B", [t for t in teams if t != team_a], key=f"lg_team_b_{league_key}"
-            )
+        if not is_2v2:
+            col4, col5 = st.columns(2)
+            with col4:
+                team_a = st.selectbox("Team A", teams, key=f"lg_team_a_{league_key}")
+            with col5:
+                team_b = st.selectbox(
+                    "Team B", [t for t in teams if t != team_a], key=f"lg_team_b_{league_key}"
+                )
+            team_a2 = ""
+            team_b2 = ""
+        else:
+            st.caption("Select two teams for each side. Stats still track per original team.")
+            col4, col5 = st.columns(2)
+            with col4:
+                team_a = st.selectbox("Side A – Team 1", teams, key=f"lg_team_a1_{league_key}")
+                remaining_a = [t for t in teams if t != team_a]
+                team_a2 = st.selectbox("Side A – Team 2", remaining_a, key=f"lg_team_a2_{league_key}")
+            with col5:
+                remaining_for_b = [t for t in teams if t not in [team_a, team_a2]]
+                team_b = st.selectbox("Side B – Team 1", remaining_for_b, key=f"lg_team_b1_{league_key}")
+                remaining_b2 = [t for t in remaining_for_b if t != team_b]
+                team_b2 = st.selectbox(
+                    "Side B – Team 2",
+                    remaining_b2 if remaining_b2 else remaining_for_b,
+                    key=f"lg_team_b2_{league_key}",
+                )
 
         # Timer options based on sport
         presets = SPORT_TIMER_PRESETS.get(sport, DEFAULT_TIMER_PRESETS)
@@ -637,63 +836,128 @@ def page_live_game(league_key: str, league_name: str):
         st.markdown("<div class='clm-section-title'>Active Lineups for This Game</div>",
                     unsafe_allow_html=True)
 
-        roster_a = roster[roster["team_name"] == team_a].copy()
-        roster_b = roster[roster["team_name"] == team_b].copy()
+        # Helper to build roster per team
+        def with_display(df):
+            df = df.copy()
+            df["display"] = df.apply(
+                lambda r: f"{r['first_name']} {r['last_name']} ({r['player_id']})",
+                axis=1,
+            )
+            return df
 
-        def player_display(row):
-            return f"{row['first_name']} {row['last_name']} ({row['player_id']})"
-
-        roster_a["display"] = roster_a.apply(player_display, axis=1)
-        roster_b["display"] = roster_b.apply(player_display, axis=1)
+        roster_a1 = with_display(roster[roster["team_name"] == team_a])
+        roster_b1 = with_display(roster[roster["team_name"] == team_b])
+        roster_a2 = with_display(roster[roster["team_name"] == team_a2]) if team_a2 else pd.DataFrame()
+        roster_b2 = with_display(roster[roster["team_name"] == team_b2]) if team_b2 else pd.DataFrame()
 
         col_pa, col_pb = st.columns(2)
         with col_pa:
-            active_a_display = st.multiselect(
+            active_a1_disp = st.multiselect(
                 f"Active players for {team_a}",
-                roster_a["display"].tolist(),
-                default=roster_a["display"].tolist(),
-                key=f"lg_active_a_{league_key}",
+                roster_a1["display"].tolist(),
+                default=roster_a1["display"].tolist(),
+                key=f"lg_active_a1_{league_key}",
             )
+            active_a2_disp = []
+            if is_2v2 and not roster_a2.empty:
+                active_a2_disp = st.multiselect(
+                    f"Active players for {team_a2}",
+                    roster_a2["display"].tolist(),
+                    default=roster_a2["display"].tolist(),
+                    key=f"lg_active_a2_{league_key}",
+                )
         with col_pb:
-            active_b_display = st.multiselect(
+            active_b1_disp = st.multiselect(
                 f"Active players for {team_b}",
-                roster_b["display"].tolist(),
-                default=roster_b["display"].tolist(),
-                key=f"lg_active_b_{league_key}",
+                roster_b1["display"].tolist(),
+                default=roster_b1["display"].tolist(),
+                key=f"lg_active_b1_{league_key}",
             )
+            active_b2_disp = []
+            if is_2v2 and not roster_b2.empty:
+                active_b2_disp = st.multiselect(
+                    f"Active players for {team_b2}",
+                    roster_b2["display"].tolist(),
+                    default=roster_b2["display"].tolist(),
+                    key=f"lg_active_b2_{league_key}",
+                )
+
+        # Softball batting order (simple number per active player)
+        batting_orders = {}
+        if sport == "Softball":
+            st.markdown("<div class='clm-section-title'>Softball Batting Order</div>",
+                        unsafe_allow_html=True)
+            st.caption("Optional: set batting order numbers (1, 2, 3, ...) for each active player.")
+            for label, roster_side, active_list in [
+                (team_a, roster_a1, active_a1_disp),
+                (team_a2, roster_a2, active_a2_disp if is_2v2 else []),
+                (team_b, roster_b1, active_b1_disp),
+                (team_b2, roster_b2, active_b2_disp if is_2v2 else []),
+            ]:
+                if not label:
+                    continue
+                if not active_list:
+                    continue
+                st.write(f"**{label} batting order**")
+                for disp in active_list:
+                    key = f"bo_{league_key}_{label}_{disp}"
+                    spot = st.number_input(
+                        f"{disp}",
+                        min_value=1,
+                        max_value=len(active_list),
+                        step=1,
+                        value=active_list.index(disp) + 1,
+                        key=key,
+                    )
+                    batting_orders[disp] = spot
 
         if st.button("Start Live Game", key=f"lg_start_{league_key}"):
-            if not active_a_display or not active_b_display:
-                st.error("Please select at least one active player for each team.")
+            # Validate active players
+            if not active_a1_disp or not active_b1_disp:
+                st.error("Please select at least one active player for each side.")
                 return
 
-            # Build player list
             stat_fields = SPORT_STATS.get(sport, [])
             players = []
 
             def add_players(roster_side, active_display, team_name):
-                for _, r in roster_side.iterrows():
-                    if r["display"] not in active_display:
-                        continue
+                # Sort by batting order if defined, else keep original order
+                if sport == "Softball":
+                    sorted_disp = sorted(
+                        active_display,
+                        key=lambda d: batting_orders.get(d, 999),
+                    )
+                else:
+                    sorted_disp = active_display
+
+                for disp in sorted_disp:
+                    row = roster_side[roster_side["display"] == disp].iloc[0]
                     player = {
-                        "player_id": str(r["player_id"]),
-                        "player_name": f"{r['first_name']} {r['last_name']}",
+                        "player_id": str(row["player_id"]),
+                        "player_name": f"{row['first_name']} {row['last_name']}",
                         "team_name": team_name,
                     }
                     for sf in stat_fields:
                         player[sf] = 0
                     players.append(player)
 
-            add_players(roster_a, active_a_display, team_a)
-            add_players(roster_b, active_b_display, team_b)
+            add_players(roster_a1, active_a1_disp, team_a)
+            if is_2v2 and not roster_a2.empty and active_a2_disp:
+                add_players(roster_a2, active_a2_disp, team_a2)
+            add_players(roster_b1, active_b1_disp, team_b)
+            if is_2v2 and not roster_b2.empty and active_b2_disp:
+                add_players(roster_b2, active_b2_disp, team_b2)
 
             # Initialize live state
             live["status"] = "in_progress"
             live["date"] = date.isoformat()
             live["sport"] = sport
             live["level"] = level
+            live["match_type"] = "2v2" if is_2v2 else "1v1"
             live["team_a"] = team_a
+            live["team_a2"] = team_a2 if is_2v2 else ""
             live["team_b"] = team_b
+            live["team_b2"] = team_b2 if is_2v2 else ""
             live["score_a"] = 0
             live["score_b"] = 0
             live["timer_minutes"] = timer_minutes
@@ -717,7 +981,17 @@ def page_live_game(league_key: str, league_name: str):
         st.markdown(f"**League:** {league_name}")
         st.markdown(f"**Sport:** {live.get('sport', '')}")
         st.markdown(f"**Level:** {live.get('level', '')}")
-        st.markdown(f"**Teams:** {live.get('team_a', '')} vs {live.get('team_b', '')}")
+        side_label_a = (
+            live.get("team_a", "")
+            if live.get("match_type") != "2v2"
+            else f"{live.get('team_a', '')} + {live.get('team_a2', '')}"
+        )
+        side_label_b = (
+            live.get("team_b", "")
+            if live.get("match_type") != "2v2"
+            else f"{live.get('team_b', '')} + {live.get('team_b2', '')}"
+        )
+        st.markdown(f"**Sides:** {side_label_a} vs {side_label_b}")
         st.markdown(f"**Date:** {live.get('date', '')}")
     with col_info2:
         st.markdown("<div class='clm-section-title'>Timer</div>", unsafe_allow_html=True)
@@ -728,12 +1002,10 @@ def page_live_game(league_key: str, league_name: str):
         col_t1, col_t2, col_t3 = st.columns(3)
         with col_t1:
             if st.button("Start / Resume", key=f"timer_start_{league_key}"):
-                if live.get("timer_minutes", 0) > 0:
-                    # If already running, do nothing; else start from now
-                    if not live.get("timer_running", False):
-                        live["timer_running"] = True
-                        live["timer_start"] = datetime.now().isoformat()
-                        st.rerun()
+                if live.get("timer_minutes", 0) > 0 and not live.get("timer_running", False):
+                    live["timer_running"] = True
+                    live["timer_start"] = datetime.now().isoformat()
+                    st.rerun()
         with col_t2:
             if st.button("Pause", key=f"timer_pause_{league_key}"):
                 if live.get("timer_minutes", 0) > 0 and live.get("timer_running", False):
@@ -757,8 +1029,11 @@ def page_live_game(league_key: str, league_name: str):
     st.markdown("---")
 
     # Big SCOREBOARD
+    match_type = live.get("match_type", "1v1")
     team_a = live.get("team_a", "")
+    team_a2 = live.get("team_a2", "")
     team_b = live.get("team_b", "")
+    team_b2 = live.get("team_b2", "")
     score_a = int(live.get("score_a", 0))
     score_b = int(live.get("score_b", 0))
     sport = live.get("sport", "")
@@ -766,7 +1041,10 @@ def page_live_game(league_key: str, league_name: str):
     col_sa, col_timer_mid, col_sb = st.columns([3, 2, 3])
 
     with col_sa:
-        st.markdown(f"<div class='clm-team-name'>{team_a}</div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div class='clm-team-name'>{side_label_a}</div>",
+            unsafe_allow_html=True,
+        )
         st.markdown(f"<div class='clm-scoreboard'>{score_a}</div>", unsafe_allow_html=True)
 
         # Team A scoring buttons
@@ -794,11 +1072,14 @@ def page_live_game(league_key: str, league_name: str):
                 st.rerun()
 
     with col_timer_mid:
-        # Timer already shown above; just leave empty here or add label
+        # spacer
         st.markdown("<div style='height:2rem;'></div>", unsafe_allow_html=True)
 
     with col_sb:
-        st.markdown(f"<div class='clm-team-name'>{team_b}</div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div class='clm-team-name'>{side_label_b}</div>",
+            unsafe_allow_html=True,
+        )
         st.markdown(f"<div class='clm-scoreboard'>{score_b}</div>", unsafe_allow_html=True)
 
         # Team B scoring buttons
@@ -839,18 +1120,27 @@ def page_live_game(league_key: str, league_name: str):
         st.markdown("<div class='clm-section-title'>Current Player Stats (This Game)</div>",
                     unsafe_allow_html=True)
 
-        # Show & control players by team
+        side_a_teams = [team_a]
+        if team_a2:
+            side_a_teams.append(team_a2)
+        side_b_teams = [team_b]
+        if team_b2:
+            side_b_teams.append(team_b2)
+
+        flash = get_flash_stat(league_key)
+
         col_ta, col_tb = st.columns(2)
 
         with col_ta:
-            st.markdown(f"#### {team_a}")
-            df_a = df_players[df_players["team_name"] == team_a].copy()
+            st.markdown(f"#### {side_label_a}")
+            df_a = df_players[df_players["team_name"].isin(side_a_teams)].copy()
             if df_a.empty:
-                st.info("No active players on this team.")
+                st.info("No active players on this side.")
             else:
                 for idx, row in df_a.iterrows():
                     p_name = row["player_name"]
-                    st.write(f"**{p_name}**")
+                    team_name = row["team_name"]
+                    st.write(f"**{p_name}** ({team_name})", unsafe_allow_html=True)
                     cols_row = st.columns(len(stat_fields))
                     for j, sf in enumerate(stat_fields):
                         label = STAT_LABELS.get(sf, sf.replace("_", " ").title())
@@ -858,23 +1148,30 @@ def page_live_game(league_key: str, league_name: str):
                             f"+1 {label}",
                             key=f"{league_key}_A_{idx}_{sf}_plus",
                         ):
-                            # Update in live state
                             for p in players:
-                                if p["player_name"] == p_name and p["team_name"] == team_a:
+                                if p["player_name"] == p_name and p["team_name"] == team_name:
                                     p[sf] = p.get(sf, 0) + 1
                                     break
                             live["players"] = players
+                            set_flash_stat(league_key, p_name, team_name, label)
                             st.rerun()
+                    # flash confirmation
+                    if flash and flash["player_name"] == p_name and flash["team_name"] == team_name:
+                        st.markdown(
+                            f"<span class='clm-flash'>+1 {flash['stat_label']} added</span>",
+                            unsafe_allow_html=True,
+                        )
 
         with col_tb:
-            st.markdown(f"#### {team_b}")
-            df_b = df_players[df_players["team_name"] == team_b].copy()
+            st.markdown(f"#### {side_label_b}")
+            df_b = df_players[df_players["team_name"].isin(side_b_teams)].copy()
             if df_b.empty:
-                st.info("No active players on this team.")
+                st.info("No active players on this side.")
             else:
                 for idx, row in df_b.iterrows():
                     p_name = row["player_name"]
-                    st.write(f"**{p_name}**")
+                    team_name = row["team_name"]
+                    st.write(f"**{p_name}** ({team_name})", unsafe_allow_html=True)
                     cols_row = st.columns(len(stat_fields))
                     for j, sf in enumerate(stat_fields):
                         label = STAT_LABELS.get(sf, sf.replace("_", " ").title())
@@ -883,11 +1180,17 @@ def page_live_game(league_key: str, league_name: str):
                             key=f"{league_key}_B_{idx}_{sf}_plus",
                         ):
                             for p in players:
-                                if p["player_name"] == p_name and p["team_name"] == team_b:
+                                if p["player_name"] == p_name and p["team_name"] == team_name:
                                     p[sf] = p.get(sf, 0) + 1
                                     break
                             live["players"] = players
+                            set_flash_stat(league_key, p_name, team_name, label)
                             st.rerun()
+                    if flash and flash["player_name"] == p_name and flash["team_name"] == team_name:
+                        st.markdown(
+                            f"<span class='clm-flash'>+1 {flash['stat_label']} added</span>",
+                            unsafe_allow_html=True,
+                        )
 
         st.markdown("---")
 
@@ -909,6 +1212,16 @@ def page_live_game(league_key: str, league_name: str):
             st.success("Lineup updated for this game.")
             st.rerun()
 
+        st.markdown("---")
+        st.markdown("<div class='clm-section-title'>Stats Summary for This Game</div>",
+                    unsafe_allow_html=True)
+
+        # Stats summary table for this game
+        if stat_fields:
+            summary_df = df_players[["team_name", "player_name"] + stat_fields].copy()
+            summary_df = summary_df.sort_values(["team_name", "player_name"]).reset_index(drop=True)
+            st.dataframe(summary_df, use_container_width=True)
+
     st.markdown("---")
 
     # Finalize or cancel game
@@ -921,15 +1234,16 @@ def page_live_game(league_key: str, league_name: str):
             # Determine new game_id
             new_game_id = 1 if games.empty else int(games["game_id"].max()) + 1
 
-            # Compute game points (simple 2/1/0 rule)
             score_a_final = int(live.get("score_a", 0))
             score_b_final = int(live.get("score_b", 0))
-            if score_a_final > score_b_final:
-                points_a, points_b = 2, 0
-            elif score_a_final < score_b_final:
-                points_a, points_b = 0, 2
-            else:
-                points_a = points_b = 1
+
+            points_a, points_b = assign_points_for_result(
+                league_key,
+                live.get("sport", ""),
+                live.get("level", ""),
+                score_a_final,
+                score_b_final,
+            )
 
             game_row = {
                 "game_id": new_game_id,
@@ -937,8 +1251,11 @@ def page_live_game(league_key: str, league_name: str):
                 "league_key": league_key,
                 "sport": live.get("sport", ""),
                 "level": live.get("level", ""),
+                "match_type": live.get("match_type", "1v1"),
                 "team_a": live.get("team_a", ""),
+                "team_a2": live.get("team_a2", ""),
                 "team_b": live.get("team_b", ""),
+                "team_b2": live.get("team_b2", ""),
                 "score_a": score_a_final,
                 "score_b": score_b_final,
                 "points_a": points_a,
@@ -1107,27 +1424,39 @@ def page_highlights(league_name: str):
 
     df_high = get_highlights(league_key)
 
-    st.subheader("Add Highlight (file reference)")
+    st.subheader("Add Highlight (upload file)")
     date = st.date_input("Date", value=datetime.today(), key=f"hl_date_{league_key}")
     title = st.text_input("Title", key=f"hl_title_{league_key}")
     desc = st.text_area("Description", key=f"hl_desc_{league_key}")
-    file_name = st.text_input(
-        "Video file name / URL (for now, just store a reference)",
+    uploaded_file = st.file_uploader(
+        "Highlight video file",
+        type=["mp4", "mov", "avi", "mkv", "webm"],
         key=f"hl_file_{league_key}",
     )
 
     if st.button("Save Highlight", key=f"hl_save_{league_key}"):
-        new_id = 1 if df_high.empty else int(df_high["id"].max()) + 1
-        new_row = {
-            "id": new_id,
-            "date": date.isoformat(),
-            "title": title,
-            "description": desc,
-            "file_name": file_name,
-        }
-        df_high = pd.concat([df_high, pd.DataFrame([new_row])], ignore_index=True)
-        save_highlights(league_key, df_high)
-        st.success("Highlight saved.")
+        if uploaded_file is None:
+            st.error("Please upload a highlight file.")
+        else:
+            league_dir = DATA_DIR / "highlights_files" / league_key
+            league_dir.mkdir(parents=True, exist_ok=True)
+            filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uploaded_file.name}"
+            save_path = league_dir / filename
+            with open(save_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+
+            new_id = 1 if df_high.empty else int(df_high["id"].max()) + 1
+            new_row = {
+                "id": new_id,
+                "date": date.isoformat(),
+                "title": title,
+                "description": desc,
+                "file_path": str(save_path),
+                "file_name": uploaded_file.name,
+            }
+            df_high = pd.concat([df_high, pd.DataFrame([new_row])], ignore_index=True)
+            save_highlights(league_key, df_high)
+            st.success("Highlight saved.")
 
     st.markdown("---")
     st.subheader("Highlights List")
@@ -1135,7 +1464,14 @@ def page_highlights(league_name: str):
     if df_high.empty:
         st.info("No highlights yet.")
     else:
-        st.dataframe(df_high, use_container_width=True)
+        st.dataframe(df_high[["id", "date", "title", "description", "file_name"]], use_container_width=True)
+        st.markdown("### Preview (first few videos)")
+        # Show up to 3 previews
+        for _, row in df_high.head(3).iterrows():
+            path = row.get("file_path")
+            if path and Path(path).exists():
+                st.write(f"**{row['title']}** – {row['file_name']}")
+                st.video(path)
 
 
 def page_display_board(current_league_name: str):
