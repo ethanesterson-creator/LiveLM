@@ -1,7 +1,6 @@
-streamlit
-pandas
+streamlit>=1.36
+pandas>=2.0
 gspread
 google-auth
 pytz
-supabase
 supabase>=2.0.0
