@@ -593,7 +593,7 @@ def page_live_games(league_key: str):
         st.session_state.live_games[gid] = game
         st.session_state.active_game_id = gid
         toast_ok("Live game created.")
-        st.experimental_rerun()
+        st.rerun()
 
     st.divider()
     st.subheader("Your Live Games (this device)")
@@ -620,7 +620,7 @@ def page_live_games(league_key: str):
     pick = st.selectbox("Open a live game", list(st.session_state.live_games.keys()))
     if st.button("Open Selected Game"):
         st.session_state.active_game_id = pick
-        st.experimental_rerun()
+        st.rerun()
 
 def page_run_live_game(league_key: str):
     st.markdown(f'<div class="title">Run Live Game</div>', unsafe_allow_html=True)
@@ -637,7 +637,7 @@ def page_run_live_game(league_key: str):
     if game.get("timer_running", False) and int(game.get("duration_seconds", 0)) > 0:
         time.sleep(1)
         st.session_state.tick += 1
-        st.experimental_rerun()
+        st.rerun()
 
     remaining = compute_remaining(game)
     time_str = "—" if int(game.get("duration_seconds", 0)) <= 0 else format_mm_ss(remaining)
@@ -675,23 +675,23 @@ def page_run_live_game(league_key: str):
         if st.button("▶ Start / Resume", use_container_width=True):
             timer_start(game)
             toast_ok("Timer started.")
-            st.experimental_rerun()
+            st.rerun()
     with c2:
         if st.button("⏸ Pause", use_container_width=True):
             timer_pause(game)
             toast_ok("Timer paused.")
-            st.experimental_rerun()
+            st.rerun()
     with c3:
         if st.button("⟲ Reset Timer", use_container_width=True):
             timer_reset(game)
             toast_ok("Timer reset.")
-            st.experimental_rerun()
+            st.rerun()
     with c4:
         if st.button("🧹 Reset Score", use_container_width=True):
             game["score_a"] = 0
             game["score_b"] = 0
             toast_ok("Score reset.")
-            st.experimental_rerun()
+            st.rerun()
 
     st.divider()
 
@@ -702,29 +702,29 @@ def page_run_live_game(league_key: str):
         with left:
             st.write("Team A")
             b1, b2, b3, b4 = st.columns(4)
-            if b1.button("+1", use_container_width=True): bump_score(game, "A", 1); toast_ok("Team A +1"); st.experimental_rerun()
-            if b2.button("+2", use_container_width=True): bump_score(game, "A", 2); toast_ok("Team A +2"); st.experimental_rerun()
-            if b3.button("+3", use_container_width=True): bump_score(game, "A", 3); toast_ok("Team A +3"); st.experimental_rerun()
-            if b4.button("-1", use_container_width=True): bump_score(game, "A", -1); toast_ok("Team A -1"); st.experimental_rerun()
+            if b1.button("+1", use_container_width=True): bump_score(game, "A", 1); toast_ok("Team A +1"); st.rerun()
+            if b2.button("+2", use_container_width=True): bump_score(game, "A", 2); toast_ok("Team A +2"); st.rerun()
+            if b3.button("+3", use_container_width=True): bump_score(game, "A", 3); toast_ok("Team A +3"); st.rerun()
+            if b4.button("-1", use_container_width=True): bump_score(game, "A", -1); toast_ok("Team A -1"); st.rerun()
         with right:
             st.write("Team B")
             b1, b2, b3, b4 = st.columns(4)
-            if b1.button("+1 ", use_container_width=True): bump_score(game, "B", 1); toast_ok("Team B +1"); st.experimental_rerun()
-            if b2.button("+2 ", use_container_width=True): bump_score(game, "B", 2); toast_ok("Team B +2"); st.experimental_rerun()
-            if b3.button("+3 ", use_container_width=True): bump_score(game, "B", 3); toast_ok("Team B +3"); st.experimental_rerun()
-            if b4.button("-1 ", use_container_width=True): bump_score(game, "B", -1); toast_ok("Team B -1"); st.experimental_rerun()
+            if b1.button("+1 ", use_container_width=True): bump_score(game, "B", 1); toast_ok("Team B +1"); st.rerun()
+            if b2.button("+2 ", use_container_width=True): bump_score(game, "B", 2); toast_ok("Team B +2"); st.rerun()
+            if b3.button("+3 ", use_container_width=True): bump_score(game, "B", 3); toast_ok("Team B +3"); st.rerun()
+            if b4.button("-1 ", use_container_width=True): bump_score(game, "B", -1); toast_ok("Team B -1"); st.rerun()
     else:
         left, right = st.columns(2)
         with left:
             st.write("Team A")
             b1, b2 = st.columns(2)
-            if b1.button("+1", use_container_width=True): bump_score(game, "A", 1); toast_ok("Team A +1"); st.experimental_rerun()
-            if b2.button("-1", use_container_width=True): bump_score(game, "A", -1); toast_ok("Team A -1"); st.experimental_rerun()
+            if b1.button("+1", use_container_width=True): bump_score(game, "A", 1); toast_ok("Team A +1"); st.rerun()
+            if b2.button("-1", use_container_width=True): bump_score(game, "A", -1); toast_ok("Team A -1"); st.rerun()
         with right:
             st.write("Team B")
             b1, b2 = st.columns(2)
-            if b1.button("+1 ", use_container_width=True): bump_score(game, "B", 1); toast_ok("Team B +1"); st.experimental_rerun()
-            if b2.button("-1 ", use_container_width=True): bump_score(game, "B", -1); toast_ok("Team B -1"); st.experimental_rerun()
+            if b1.button("+1 ", use_container_width=True): bump_score(game, "B", 1); toast_ok("Team B +1"); st.rerun()
+            if b2.button("-1 ", use_container_width=True): bump_score(game, "B", -1); toast_ok("Team B -1"); st.rerun()
 
     st.divider()
 
@@ -765,7 +765,7 @@ def page_run_live_game(league_key: str):
                     bump_player_stat(game, pid, stat_key, 1)
                     # green confirmation
                     toast_ok(f"{name}: +1 {stat_key}")
-                    st.experimental_rerun()
+                    st.rerun()
 
     st.divider()
 
