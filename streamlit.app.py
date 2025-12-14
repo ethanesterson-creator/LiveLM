@@ -1013,7 +1013,7 @@ def main() -> None:
     inject_css()
 
     # Sidebar
-    st.sidebar.markdown(f"<div class='bc-title'>Manager</div>", unsafe_allow_html=True)
+    st.sidebar.markdown(f"<div class='bc-title'>League Manager</div>", unsafe_allow_html=True)
     st.sidebar.markdown("<div class='bc-subtitle'>Crest League • Live engine (Supabase)</div>", unsafe_allow_html=True)
     try:
         st.sidebar.image(LOGO_PATH, use_container_width=True)
