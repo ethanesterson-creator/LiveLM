@@ -929,38 +929,63 @@ def page_standings(current_league: str) -> None:
     if not sheets_ready():
         st.warning("Sheets not configured.")
         return
-    # This assumes you already have a sheet tab called "games" with at least:
-    # league_key, sport, level, team_a, team_b, winner_team
+
     df = df_from_ws("games")
     if df.empty:
         st.info("No games yet.")
         return
 
-    # Filter to selected league
-    df = df[df.get("league_key", "") == current_league].copy()
+    # Filter league
+    if "league_key" not in df.columns:
+        st.error("Sheet 'games' missing column: league_key")
+        return
+    df = df[df["league_key"] == current_league].copy()
     if df.empty:
         st.info("No games yet for this league.")
         return
 
-    # Compute points
-    # Expect columns: team_a, team_b, winner_team, sport, level
-    for col in ["team_a", "team_b", "winner_team", "sport", "level"]:
-        if col not in df.columns:
-            st.error(f"Sheet 'games' is missing column: {col}")
+    # Required columns for YOUR sheet
+    required = {"team_a1", "team_a2", "team_b1", "team_b2", "points_a", "points_b", "mode"}
+    missing = required - set(df.columns)
+    if missing:
+        st.error(f"Sheet 'games' missing columns: {', '.join(sorted(missing))}")
+        return
+
+    # numeric points
+    df["points_a"] = pd.to_numeric(df["points_a"], errors="coerce").fillna(0).astype(int)
+    df["points_b"] = pd.to_numeric(df["points_b"], errors="coerce").fillna(0).astype(int)
+
+    totals = {}
+
+    def add_points(team, pts):
+        if not team or str(team).strip() == "":
             return
+        totals[team] = totals.get(team, 0) + int(pts)
 
-    teams = sorted(set(df["team_a"].tolist() + df["team_b"].tolist()))
-    pts = {t: 0 for t in teams}
     for _, r in df.iterrows():
-        sport = str(r["sport"])
-        lvl = str(r["level"])
-        winner = str(r["winner_team"])
-        p = POINTS.get(current_league, {}).get(sport, {}).get(lvl, 0)
-        if winner in pts:
-            pts[winner] += int(p)
+        mode = str(r.get("mode", "1v1"))
+        a1, a2 = str(r.get("team_a1","")).strip(), str(r.get("team_a2","")).strip()
+        b1, b2 = str(r.get("team_b1","")).strip(), str(r.get("team_b2","")).strip()
+        pa, pb = int(r["points_a"]), int(r["points_b"])
 
-    out = pd.DataFrame({"team": list(pts.keys()), "points": list(pts.values())}).sort_values("points", ascending=False)
+        if mode == "2v2":
+            # split points evenly across the 2 teams on each side (if present)
+            a_teams = [t for t in [a1, a2] if t]
+            b_teams = [t for t in [b1, b2] if t]
+            if a_teams:
+                share = pa // len(a_teams)
+                for t in a_teams: add_points(t, share)
+            if b_teams:
+                share = pb // len(b_teams)
+                for t in b_teams: add_points(t, share)
+        else:
+            add_points(a1, pa)
+            add_points(b1, pb)
+
+    out = pd.DataFrame({"team": list(totals.keys()), "points": list(totals.values())})
+    out = out.sort_values("points", ascending=False).reset_index(drop=True)
     st.dataframe(out, use_container_width=True)
+
 
 
 def page_highlights() -> None:
