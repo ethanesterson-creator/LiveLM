@@ -1,1072 +1,1114 @@
-# streamlit.app.py
-import json
 import time
 import uuid
-from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+import json
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Dict, List, Tuple, Optional
 
 import pandas as pd
+import pytz
 import streamlit as st
 
-# ---- Optional deps (installed via requirements.txt) ----
-# gspread + google-auth for Google Sheets (rosters, games, stats, non-game points, highlights)
+# Supabase
+try:
+    from supabase import create_client
+except Exception:
+    create_client = None
+
+# Google Sheets (optional)
 try:
     import gspread
     from google.oauth2.service_account import Credentials
-except Exception:  # pragma: no cover
+except Exception:
     gspread = None
     Credentials = None
 
-# Supabase for live-game engine + concurrency
-try:
-    from supabase import create_client
-except Exception:  # pragma: no cover
-    create_client = None
+# =========================
+# CAMP SETTINGS / BRANDING
+# =========================
+ET = pytz.timezone("America/New_York")
+APP_TITLE = "Bauercrest League Manager"
 
+LOGO_PATH = "logo-header-2.png"  # optional
+BC_BG = "#F6F7FB"
+BC_PRIMARY = "#0B1E3B"
+BC_ACCENT = "#C9A227"
 
 # =========================
-# Branding
+# LEAGUES / SHEET TAB NAMES
 # =========================
-BAUERCREST_NAVY = "#0B1F3B"
-BAUERCREST_GOLD = "#D4AF37"
+LEAGUES = {
+    "Sophomore League": "sophmore",
+    "Junior League": "junior",
+    "Senior League": "seniors",
+}
 
-APP_TITLE = "Bauercrest Crest League Manager (Live)"
+ROSTER_SHEETS = {
+    "sophmore": "rosters_sophmore",
+    "junior": "rosters_junior",
+    "seniors": "rosters_seniors",
+}
 
-# If you have a local logo file in your repo, keep this path
-LOGO_PATH = "bauercrest_logo.png"  # adjust if needed
-
+SHEET_TABS = {
+    "games": "games",
+    "stats": "stats",
+    "nongamepoints": "nongamepoints",
+    "highlights": "highlights",
+}
 
 # =========================
-# League configuration
+# SPORTS / STATS / TIMERS
 # =========================
-LEAGUES = [
-    ("sophmore", "Sophmore League"),
-    ("junior", "Junior League"),
-    ("seniors", "Senior League"),
-]
-
-LEAGUE_KEYS = [k for k, _ in LEAGUES]
-LEAGUE_LABELS = {k: v for k, v in LEAGUES}
-
-# Sports list (extend any time)
 SPORTS = [
     "Basketball",
-    "Football",
     "Softball",
-    "Kickball",
+    "Football",
     "Hockey",
     "Soccer",
+    "Kickball",
     "Euro",
     "Speedball",
-    "Volleyball",
-    "Dodgeball",
-    "Tennis",
-    "Wiffleball",
-    "Handball",
 ]
 
-LEVELS = ["A", "B", "C", "D"]
-
-GAME_MODES = [
-    ("1v1", "1 team vs 1 team"),
-    ("2v2", "2 teams vs 2 teams (combined)"),
-]
-
-# Stat keys per sport for the live stat-buttons UI
-SPORT_STATS: Dict[str, List[str]] = {
-    "Basketball": ["PTS", "AST", "REB", "STL", "BLK"],
-    "Football": ["TD", "REC", "INT", "SACK"],
-    "Softball": ["H", "RBI", "R", "BB", "SO"],
-    "Kickball": ["K", "R", "RBI", "OUT"],
-    "Hockey": ["G", "A", "SOG"],
-    "Soccer": ["G", "A", "SOG"],
-    "Euro": ["G", "A"],
-    "Speedball": ["G", "A"],
-    "Volleyball": ["K", "A", "D"],
-    "Dodgeball": ["OUT", "CATCH"],
-    "Tennis": ["GAME_W"],
-    "Wiffleball": ["H", "RBI", "R"],
-    "Handball": ["G", "A"],
+SPORT_STATS = {
+    "Basketball": [("PTS", "+1 PTS"), ("AST", "+1 AST"), ("REB", "+1 REB"), ("STL", "+1 STL"), ("BLK", "+1 BLK")],
+    "Hockey":     [("G", "+1 G"), ("A", "+1 A"), ("SV", "+1 SV")],
+    "Football":   [("TD", "+1 TD"), ("REC", "+1 REC"), ("INT", "+1 INT")],
+    "Softball":   [("H", "+1 H"), ("2B", "+1 2B"), ("3B", "+1 3B"), ("HR", "+1 HR"), ("RBI", "+1 RBI"), ("R", "+1 R")],
+    "Soccer":     [("G", "+1 G"), ("A", "+1 A"), ("SV", "+1 SV")],
+    "Kickball":   [("R", "+1 R"), ("H", "+1 H")],
+    "Euro":       [("PTS", "+1 PTS"), ("AST", "+1 AST")],
+    "Speedball":  [("PTS", "+1 PTS"), ("AST", "+1 AST"), ("G", "+1 G")],
 }
 
-# Score increment presets per sport (buttons on scoreboard)
-SCORE_BUTTONS: Dict[str, List[int]] = {
-    "Basketball": [1, 2, 3, -1],
-    "Football": [1, 2, 3, 6, -1],
-    "Softball": [1, -1],
-    "Kickball": [1, -1],
-    "Hockey": [1, -1],
-    "Soccer": [1, -1],
-    "Euro": [1, -1],
-    "Speedball": [1, -1],
-    "Volleyball": [1, -1],
-    "Dodgeball": [1, -1],
-    "Tennis": [1, -1],
-    "Wiffleball": [1, -1],
-    "Handball": [1, -1],
-}
-
-# Timer preset options per sport (duration_seconds, label)
-SPORT_TIMER_PRESETS: Dict[str, List[Tuple[int, str]]] = {
+# More timer presets per sport (you asked for more, not less)
+TIMER_PRESETS = {
     "Basketball": [
-        (15 * 60 * 2, "15 min halves (total 30:00)"),
-        (20 * 60 * 2, "20 min halves (total 40:00)"),
-        (12 * 60 * 4, "12 min quarters (total 48:00)"),
+        ("15:00 halves (running)", 30*60),
+        ("15:00 halves (stop clock)", 30*60),
+        ("20:00 halves (running)", 40*60),
+        ("20:00 halves (stop clock)", 40*60),
+        ("10:00 halves (running)", 20*60),
+        ("No timer (manual)", 0),
     ],
     "Hockey": [
-        (15 * 60 * 3, "15 min periods (total 45:00)"),
-        (12 * 60 * 3, "12 min periods (total 36:00)"),
-    ],
-    "Soccer": [
-        (20 * 60 * 2, "20 min halves (total 40:00)"),
-        (25 * 60 * 2, "25 min halves (total 50:00)"),
+        ("12:00 periods (running)", 36*60),
+        ("15:00 periods (running)", 45*60),
+        ("10:00 periods (running)", 30*60),
+        ("No timer (manual)", 0),
     ],
     "Football": [
-        (12 * 60 * 2, "12 min halves (total 24:00)"),
-        (15 * 60 * 2, "15 min halves (total 30:00)"),
+        ("20:00 halves (running)", 40*60),
+        ("15:00 halves (running)", 30*60),
+        ("10:00 halves (running)", 20*60),
+        ("No timer (manual)", 0),
+    ],
+    "Soccer": [
+        ("20:00 halves (running)", 40*60),
+        ("15:00 halves (running)", 30*60),
+        ("10:00 halves (running)", 20*60),
+        ("No timer (manual)", 0),
     ],
     "Softball": [
-        (60 * 60, "1 hour time-cap"),
-        (45 * 60, "45 min time-cap"),
+        ("No timer (innings style)", 0),
+        ("60:00 hard cap (running)", 60*60),
     ],
     "Kickball": [
-        (45 * 60, "45 min time-cap"),
-        (35 * 60, "35 min time-cap"),
+        ("No timer (innings style)", 0),
+        ("45:00 hard cap (running)", 45*60),
+        ("30:00 hard cap (running)", 30*60),
     ],
     "Euro": [
-        (15 * 60 * 2, "15 min halves (total 30:00)"),
-        (20 * 60 * 2, "20 min halves (total 40:00)"),
+        ("15:00 halves (running)", 30*60),
+        ("20:00 halves (running)", 40*60),
+        ("No timer (manual)", 0),
     ],
     "Speedball": [
-        (15 * 60 * 2, "15 min halves (total 30:00)"),
-    ],
-    "Volleyball": [
-        (30 * 60, "30 min time-cap"),
-    ],
-    "Dodgeball": [
-        (25 * 60, "25 min time-cap"),
-    ],
-    "Tennis": [
-        (45 * 60, "45 min time-cap"),
-    ],
-    "Wiffleball": [
-        (45 * 60, "45 min time-cap"),
-    ],
-    "Handball": [
-        (15 * 60 * 2, "15 min halves (total 30:00)"),
+        ("15:00 halves (running)", 30*60),
+        ("20:00 halves (running)", 40*60),
+        ("No timer (manual)", 0),
     ],
 }
 
-# Points mapping (editable). These are "game win points" example values.
-# Structure: POINTS[league_key][sport][level] = points_for_win
-POINTS: Dict[str, Dict[str, Dict[str, int]]] = {lk: {} for lk in LEAGUE_KEYS}
-for lk in LEAGUE_KEYS:
-    for s in SPORTS:
-        POINTS[lk][s] = {lvl: 10 for lvl in LEVELS}  # default
-
-# Seed reasonable examples based on your guidance:
-# Seniors: A Softball 50, B 45, C 40, D 35
-POINTS["seniors"]["Softball"] = {"A": 50, "B": 45, "C": 40, "D": 35}
-# Seniors: A Football 40, B 35, C 30, D 25
-POINTS["seniors"]["Football"] = {"A": 40, "B": 35, "C": 30, "D": 25}
-# Juniors: scale down ~10
-POINTS["junior"]["Softball"] = {"A": 40, "B": 35, "C": 30, "D": 25}
-POINTS["junior"]["Football"] = {"A": 32, "B": 28, "C": 24, "D": 20}
-# Sophmores: A Softball ~35 down by 5
-POINTS["sophmore"]["Softball"] = {"A": 35, "B": 30, "C": 25, "D": 20}
-POINTS["sophmore"]["Football"] = {"A": 28, "B": 24, "C": 20, "D": 16}
-
+# Points table (camp-approximate). You can tweak later in Admin.
+POINTS_TABLE = {
+    "seniors": {
+        "Softball": {"A": 50, "B": 45, "C": 40, "D": 35},
+        "Football": {"A": 40, "B": 35, "C": 30, "D": 25},
+        "Basketball": {"A": 35, "B": 30, "C": 25, "D": 20},
+        "Hockey": {"A": 35, "B": 30, "C": 25, "D": 20},
+        "Soccer": {"A": 30, "B": 25, "C": 20, "D": 15},
+        "Euro": {"A": 30, "B": 25, "C": 20, "D": 15},
+        "Speedball": {"A": 30, "B": 25, "C": 20, "D": 15},
+        "Kickball": {"A": 25, "B": 20, "C": 15, "D": 10},
+    },
+    "junior": {
+        "Softball": {"A": 42, "B": 37, "C": 32, "D": 27},
+        "Football": {"A": 34, "B": 29, "C": 24, "D": 19},
+        "Basketball": {"A": 30, "B": 25, "C": 20, "D": 15},
+        "Hockey": {"A": 30, "B": 25, "C": 20, "D": 15},
+        "Soccer": {"A": 26, "B": 21, "C": 16, "D": 11},
+        "Euro": {"A": 26, "B": 21, "C": 16, "D": 11},
+        "Speedball": {"A": 26, "B": 21, "C": 16, "D": 11},
+        "Kickball": {"A": 20, "B": 15, "C": 10, "D": 8},
+    },
+    "sophmore": {
+        "Softball": {"A": 35, "B": 30, "C": 25, "D": 20},
+        "Football": {"A": 28, "B": 23, "C": 18, "D": 13},
+        "Basketball": {"A": 24, "B": 19, "C": 14, "D": 10},
+        "Hockey": {"A": 24, "B": 19, "C": 14, "D": 10},
+        "Soccer": {"A": 20, "B": 16, "C": 12, "D": 8},
+        "Euro": {"A": 20, "B": 16, "C": 12, "D": 8},
+        "Speedball": {"A": 20, "B": 16, "C": 12, "D": 8},
+        "Kickball": {"A": 16, "B": 12, "C": 8, "D": 6},
+    },
+}
 
 # =========================
-# Helpers: time + formatting
+# UTILS
 # =========================
-def now_utc() -> datetime:
-    return datetime.now(timezone.utc)
+def now_et() -> datetime:
+    return datetime.now(ET)
 
+def now_et_str() -> str:
+    return now_et().strftime("%Y-%m-%d %I:%M:%S %p ET")
 
-def fmt_clock(seconds: int) -> str:
-    if seconds < 0:
-        seconds = 0
-    m = seconds // 60
-    s = seconds % 60
-    return f"{m:02d}:{s:02d}"
+def format_mm_ss(seconds: int) -> str:
+    seconds = max(0, int(seconds))
+    mm = seconds // 60
+    ss = seconds % 60
+    return f"{mm:02d}:{ss:02d}"
 
+def safe_int(x, default=0) -> int:
+    try:
+        return int(float(x))
+    except Exception:
+        return default
 
-def inject_css() -> None:
+def points_for_result(league_key: str, sport: str, level: str, score_a: int, score_b: int) -> Tuple[float, float]:
+    base = POINTS_TABLE.get(league_key, {}).get(sport, {}).get(level, 0)
+    if score_a > score_b:
+        return float(base), 0.0
+    if score_b > score_a:
+        return 0.0, float(base)
+    return float(base) / 2.0, float(base) / 2.0
+
+def toast_ok(msg: str):
+    if hasattr(st, "toast"):
+        st.toast(msg, icon="✅")
+    else:
+        st.success(msg)
+
+def toast_err(msg: str):
+    if hasattr(st, "toast"):
+        st.toast(msg, icon="⚠️")
+    else:
+        st.error(msg)
+
+# =========================
+# STYLE
+# =========================
+def inject_css():
     st.markdown(
         f"""
         <style>
-            .bc-title {{
-                font-size: 2.0rem;
-                font-weight: 800;
-                color: {BAUERCREST_NAVY};
-                margin-bottom: 0.1rem;
-            }}
-            .bc-subtitle {{
-                color: #5b6470;
-                margin-top: 0;
-            }}
-            .scoreboard {{
-                border: 2px solid {BAUERCREST_NAVY};
-                border-radius: 14px;
-                padding: 14px;
-                background: #0f172a;
-                color: white;
-                font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-            }}
-            .scoreline {{
-                display:flex;
-                align-items:center;
-                justify-content:space-between;
-                gap: 12px;
-            }}
-            .teamname {{
-                font-size: 1.1rem;
-                font-weight: 700;
-                width: 46%;
-                overflow:hidden;
-                text-overflow: ellipsis;
-                white-space: nowrap;
-            }}
-            .score {{
-                font-size: 2.2rem;
-                font-weight: 900;
-                width: 10%;
-                text-align:center;
-            }}
-            .clock {{
-                text-align:center;
-                font-size: 3.2rem;
-                font-weight: 900;
-                letter-spacing: 1px;
-                margin: 10px 0;
-            }}
-            .pill {{
-                display:inline-block;
-                padding: 4px 10px;
-                border-radius: 999px;
-                background: rgba(255,255,255,0.1);
-                font-size: 0.85rem;
-            }}
-            .tiny {{
-                font-size: 0.85rem;
-                opacity: 0.85;
-            }}
+        .stApp {{ background: {BC_BG}; }}
+        .title {{
+            font-size: 2rem; font-weight: 900; color: {BC_PRIMARY}; margin: 0.25rem 0 0.75rem 0;
+        }}
+        .card {{
+            background: white; border: 2px solid {BC_PRIMARY}; border-radius: 16px;
+            padding: 18px; box-shadow: 0 8px 24px rgba(0,0,0,0.06);
+        }}
+        .sb-time {{
+            font-size: 4.2rem; font-weight: 950; color: {BC_PRIMARY};
+            text-align: center; letter-spacing: 2px; margin: 6px 0 4px 0;
+        }}
+        .sb-sub {{
+            text-align: center; color: #666; font-weight: 700; margin-bottom: 14px;
+        }}
+        .sb-row {{
+            display: flex; gap: 14px; justify-content: space-between; align-items: stretch;
+        }}
+        .sb-team {{
+            flex: 1; background: #f7f9ff; border: 1px solid #e6e9f5;
+            border-radius: 14px; padding: 12px;
+        }}
+        .sb-teamname {{ font-size: 1.1rem; font-weight: 900; color: {BC_PRIMARY}; margin-bottom: 6px; }}
+        .sb-score {{ font-size: 3.6rem; font-weight: 950; color: {BC_PRIMARY}; line-height: 1; }}
+        .pill {{
+            display: inline-block; padding: 6px 10px; border-radius: 999px;
+            background: {BC_PRIMARY}; color: white; font-weight: 800; font-size: 0.9rem; margin-top: 10px;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
     )
 
+# =========================
+# SECRETS + CLIENTS
+# =========================
+def get_secret(*keys: str) -> Optional[str]:
+    for k in keys:
+        v = st.secrets.get(k)
+        if v is not None and str(v).strip() != "":
+            return str(v)
+    return None
 
-# =========================
-# Google Sheets (non-live data)
-# =========================
 @st.cache_resource
-def get_gspread_client():
-    """Google Sheets client (optional)."""
-    if gspread is None or Credentials is None:
-        return None
-
-    # Support either a JSON string or a dict in secrets
-    svc = None
-    if "gcp_service_account" in st.secrets:
-        svc = st.secrets["gcp_service_account"]
-    elif "gcp_service_account_json" in st.secrets:
-        svc = st.secrets["gcp_service_account_json"]
-
-    if svc is None:
-        return None
-
-    try:
-        info = json.loads(svc) if isinstance(svc, str) else dict(svc)
-    except Exception:
-        st.error("Google service account secret is not valid JSON.")
-        return None
-
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds = Credentials.from_service_account_info(info, scopes=scopes)
-    return gspread.authorize(creds)
-
-
-def sheets_ready() -> bool:
-    return get_gspread_client() is not None and "sheet_id" in st.secrets
-
-
-def ws(name: str):
-    gc = get_gspread_client()
-    if gc is None:
-        raise RuntimeError("Google Sheets not configured.")
-    sh = gc.open_by_key(st.secrets["sheet_id"])
-    return sh.worksheet(name)
-
-
-def df_from_ws(name: str) -> pd.DataFrame:
-    w = ws(name)
-    values = w.get_all_values()
-    if not values:
-        return pd.DataFrame()
-    header = values[0]
-    rows = values[1:]
-    return pd.DataFrame(rows, columns=header)
-
-
-def overwrite_ws(name: str, df: pd.DataFrame) -> None:
-    w = ws(name)
-    w.clear()
-    w.update([df.columns.tolist()] + df.astype(str).fillna("").values.tolist())
-
-
-def append_ws(name: str, row: List) -> None:
-    w = ws(name)
-    w.append_row([str(x) if x is not None else "" for x in row])
-
-
-# =========================
-# Supabase (live game engine)
-# =========================
-@st.cache_resource
-def get_supabase():
+def supabase_client():
     if create_client is None:
         return None
-    url = st.secrets.get("supabase_url")
-    key = st.secrets.get("supabase_anon_key")
+    url = get_secret("supabase_url", "SUPABASE_URL")
+    key = get_secret("supabase_anon_key", "SUPABASE_ANON_KEY")
     if not url or not key:
         return None
-    return create_client(url, key)
-
-
-def supabase_ready() -> bool:
-    return get_supabase() is not None
-
-
-def sb_upsert_live_game(game_id: str, payload: dict) -> None:
-    sb = get_supabase()
-    if sb is None:
-        raise RuntimeError("Supabase not configured.")
-    payload = dict(payload)
-    payload["id"] = game_id
-    sb.table("live_games").upsert(payload).execute()
-
-
-def sb_create_live_game(payload: dict) -> str:
-    sb = get_supabase()
-    if sb is None:
-        raise RuntimeError("Supabase not configured.")
-    game_id = str(uuid.uuid4())
-    payload = dict(payload)
-    payload["id"] = game_id
-    sb.table("live_games").insert(payload).execute()
-    return game_id
-
-
-def sb_get_live_game(game_id: str) -> Optional[dict]:
-    sb = get_supabase()
-    if sb is None:
+    try:
+        return create_client(url, key)
+    except Exception:
         return None
-    r = sb.table("live_games").select("*").eq("id", game_id).limit(1).execute()
-    data = getattr(r, "data", None) or []
-    return data[0] if data else None
 
-
-def sb_list_live_games(status: str = "active", limit: int = 50) -> List[dict]:
-    sb = get_supabase()
-    if sb is None:
-        return []
-    r = (
-        sb.table("live_games")
-        .select("*")
-        .eq("status", status)
-        .order("created_at", desc=True)
-        .limit(limit)
-        .execute()
-    )
-    return getattr(r, "data", None) or []
-
-
-def sb_insert_event(payload: dict) -> None:
-    sb = get_supabase()
-    if sb is None:
-        raise RuntimeError("Supabase not configured.")
-    sb.table("live_events").insert(payload).execute()
-
-
-def sb_list_events(game_id: str, limit: int = 500) -> List[dict]:
-    sb = get_supabase()
-    if sb is None:
-        return []
-    r = (
-        sb.table("live_events")
-        .select("*")
-        .eq("game_id", game_id)
-        .order("created_at", desc=False)
-        .limit(limit)
-        .execute()
-    )
-    return getattr(r, "data", None) or []
-
+@st.cache_resource
+def gspread_client():
+    sid = get_secret("sheet_id", "SHEET_ID")
+    sa = st.secrets.get("gcp_service_account")
+    if not sid or not sa or gspread is None or Credentials is None:
+        return None
+    # sa may be dict, json string, or toml multiline string
+    try:
+        if isinstance(sa, dict):
+            info = sa
+        else:
+            info = json.loads(sa)
+        creds = Credentials.from_service_account_info(
+            info,
+            scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"],
+        )
+        gc = gspread.authorize(creds)
+        return gc.open_by_key(sid)
+    except Exception:
+        return None
 
 # =========================
-# Rosters
+# ROSTERS (Sheets-first, CSV fallback)
 # =========================
-def roster_sheet_name(league_key: str) -> str:
-    if league_key == "sophmore":
-        return "rosters_sophmore"
-    if league_key == "junior":
-        return "rosters_junior"
-    return "rosters_seniors"
-
-
-def roster_df(league_key: str) -> pd.DataFrame:
-    if not sheets_ready():
+@st.cache_data(ttl=60)
+def load_roster_from_sheets(league_key: str) -> pd.DataFrame:
+    book = gspread_client()
+    if book is None:
         return pd.DataFrame()
-    return df_from_ws(roster_sheet_name(league_key))
+    tab = ROSTER_SHEETS[league_key]
+    ws = book.worksheet(tab)
+    values = ws.get_all_values()
+    if not values or len(values) < 2:
+        return pd.DataFrame(columns=["player_id", "first_name", "last_name", "team_name", "bunk"])
+    headers = values[0]
+    rows = values[1:]
+    df = pd.DataFrame(rows, columns=headers)
+    # normalize
+    for c in ["player_id", "first_name", "last_name", "team_name", "bunk"]:
+        if c not in df.columns:
+            df[c] = ""
+    df = df[["player_id", "first_name", "last_name", "team_name", "bunk"]].copy()
+    df["player_id"] = df["player_id"].astype(str)
+    return df
 
-
-def teams_in_roster(df: pd.DataFrame) -> List[str]:
-    if df.empty:
-        return []
-    if "team_name" not in df.columns:
-        return []
-    return sorted([t for t in df["team_name"].dropna().unique().tolist() if str(t).strip() != ""])
-
-
-def players_for_team(df: pd.DataFrame, team: str) -> pd.DataFrame:
-    if df.empty:
+def load_roster(league_key: str) -> pd.DataFrame:
+    # 1) session override (CSV upload)
+    key = f"roster_df_{league_key}"
+    if key in st.session_state and isinstance(st.session_state[key], pd.DataFrame) and not st.session_state[key].empty:
+        return st.session_state[key].copy()
+    # 2) sheets
+    df = load_roster_from_sheets(league_key)
+    if not df.empty:
         return df
-    return df[df["team_name"] == team].copy()
-
-
-def player_label(row: pd.Series) -> str:
-    fn = str(row.get("first_name", "")).strip()
-    ln = str(row.get("last_name", "")).strip()
-    pid = str(row.get("player_id", "")).strip()
-    name = (fn + " " + ln).strip()
-    return f"{name} ({pid})" if pid else name
-
+    # 3) empty
+    return pd.DataFrame(columns=["player_id", "first_name", "last_name", "team_name", "bunk"])
 
 # =========================
-# Live game timer model (server state)
+# LIVE GAME ENGINE (local session)
 # =========================
-def compute_remaining(game: dict) -> int:
-    """Compute remaining seconds based on game.timer_anchor_ts and timer_running."""
-    dur = int(game.get("duration_seconds") or 0)
-    remaining = int(game.get("timer_remaining_seconds") or dur)
-    running = bool(game.get("timer_running"))
-    anchor = game.get("timer_anchor_ts")
-    if not running:
-        return max(0, remaining)
+def init_state():
+    st.session_state.setdefault("live_games", {})         # game_id -> game dict
+    st.session_state.setdefault("active_game_id", None)   # currently open game in this session
+    st.session_state.setdefault("tick", 0)
 
-    # anchor_ts stored as ISO string or epoch
-    anchor_epoch = None
-    if isinstance(anchor, (int, float)):
-        anchor_epoch = float(anchor)
-    elif isinstance(anchor, str) and anchor:
-        try:
-            anchor_epoch = datetime.fromisoformat(anchor.replace("Z", "+00:00")).timestamp()
-        except Exception:
-            anchor_epoch = None
+def new_game_id() -> str:
+    return uuid.uuid4().hex
 
-    if anchor_epoch is None:
-        return max(0, remaining)
+def compute_remaining(game: Dict) -> int:
+    dur = int(game.get("duration_seconds", 0))
+    if dur <= 0:
+        return 0
+    if not game.get("timer_running", False):
+        return int(game.get("remaining_at_pause", dur))
+    anchor_ts = float(game.get("anchor_ts", time.time()))
+    remaining_at_anchor = int(game.get("remaining_at_anchor", dur))
+    elapsed = time.time() - anchor_ts
+    return max(0, int(remaining_at_anchor - elapsed))
 
-    elapsed = int(time.time() - anchor_epoch)
-    return max(0, remaining - elapsed)
-
-
-def set_timer_running(game_id: str, running: bool) -> None:
-    game = sb_get_live_game(game_id)
-    if not game:
+def timer_start(game: Dict):
+    dur = int(game.get("duration_seconds", 0))
+    if dur <= 0:
         return
-    cur_remaining = compute_remaining(game)
-    payload = {
-        "updated_at": now_utc().isoformat(),
-        "timer_running": bool(running),
-        "timer_remaining_seconds": int(cur_remaining),
-        "timer_anchor_ts": time.time() if running else None,
-    }
-    sb_upsert_live_game(game_id, payload)
-
-
-def reset_timer(game_id: str) -> None:
-    game = sb_get_live_game(game_id)
-    if not game:
+    if game.get("timer_running", False):
         return
-    dur = int(game.get("duration_seconds") or 0)
-    payload = {
-        "updated_at": now_utc().isoformat(),
-        "timer_running": False,
-        "timer_remaining_seconds": int(dur),
-        "timer_anchor_ts": None,
-    }
-    sb_upsert_live_game(game_id, payload)
+    remaining = int(game.get("remaining_at_pause", dur))
+    game["timer_running"] = True
+    game["anchor_ts"] = time.time()
+    game["remaining_at_anchor"] = remaining
 
-
-def update_score(game_id: str, side: str, delta: int) -> None:
-    game = sb_get_live_game(game_id)
-    if not game:
+def timer_pause(game: Dict):
+    if not game.get("timer_running", False):
         return
-    a = int(game.get("score_a") or 0)
-    b = int(game.get("score_b") or 0)
+    remaining = compute_remaining(game)
+    game["timer_running"] = False
+    game["remaining_at_pause"] = remaining
+
+def timer_reset(game: Dict):
+    dur = int(game.get("duration_seconds", 0))
+    game["timer_running"] = False
+    game["remaining_at_pause"] = dur
+    game["anchor_ts"] = time.time()
+    game["remaining_at_anchor"] = dur
+
+def bump_score(game: Dict, side: str, delta: int):
     if side == "A":
-        a = max(0, a + delta)
+        game["score_a"] = max(0, int(game.get("score_a", 0)) + int(delta))
     else:
-        b = max(0, b + delta)
-    sb_upsert_live_game(
-        game_id,
-        {
-            "updated_at": now_utc().isoformat(),
-            "score_a": a,
-            "score_b": b,
-        },
-    )
-    sb_insert_event(
-        {
-            "game_id": game_id,
-            "created_at": now_utc().isoformat(),
-            "event_type": "score",
-            "side": side,
-            "delta": int(delta),
-        }
-    )
+        game["score_b"] = max(0, int(game.get("score_b", 0)) + int(delta))
 
-
-def add_stat(game_id: str, player_id: str, team_name: str, stat_key: str, delta: int = 1) -> None:
-    sb_insert_event(
-        {
-            "game_id": game_id,
-            "created_at": now_utc().isoformat(),
-            "event_type": "stat",
-            "player_id": player_id,
-            "team_name": team_name,
-            "stat_key": stat_key,
-            "delta": int(delta),
-        }
-    )
-
-
-def aggregated_stats(events: List[dict]) -> pd.DataFrame:
-    """Aggregate stat events to a pivot table for quick view."""
-    stat_rows = [e for e in events if e.get("event_type") == "stat"]
-    if not stat_rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(stat_rows)
-    df["delta"] = pd.to_numeric(df["delta"], errors="coerce").fillna(0).astype(int)
-    piv = (
-        df.pivot_table(
-            index=["team_name", "player_id"],
-            columns="stat_key",
-            values="delta",
-            aggfunc="sum",
-            fill_value=0,
-        )
-        .reset_index()
-    )
-    # flatten columns
-    piv.columns = [str(c) for c in piv.columns]
-    return piv
-
+def bump_player_stat(game: Dict, player_id: str, stat_key: str, delta: int = 1):
+    stats = game.setdefault("player_stats", {})  # pid -> {stat_key:value}
+    if player_id not in stats:
+        stats[player_id] = {}
+    stats[player_id][stat_key] = int(stats[player_id].get(stat_key, 0)) + int(delta)
 
 # =========================
-# UI: scoreboard display (client-side ticking)
+# SUPABASE SAVE (Finalize)
 # =========================
-def scoreboard_widget(game: dict) -> None:
-    """A JS clock ticks every second without hammering the server."""
-    team_a = game.get("team_a1") or "Team A"
-    team_b = game.get("team_b1") or "Team B"
-    score_a = int(game.get("score_a") or 0)
-    score_b = int(game.get("score_b") or 0)
+def supabase_ok() -> bool:
+    return supabase_client() is not None
 
-    dur = int(game.get("duration_seconds") or 0)
-    remaining = int(game.get("timer_remaining_seconds") or dur)
-    running = bool(game.get("timer_running"))
-    anchor = game.get("timer_anchor_ts")  # epoch float in our updates
+def finalize_to_supabase(game: Dict, roster_df: pd.DataFrame) -> Tuple[bool, str]:
+    sb = supabase_client()
+    if sb is None:
+        return False, "Supabase not configured."
 
-    # Use epoch anchor for client; if missing, treat as paused.
-    anchor_epoch = None
-    if isinstance(anchor, (int, float)):
-        anchor_epoch = float(anchor)
+    # Prepare game record
+    gid = game["game_id"]
+    league_key = game["league_key"]
+    sport = game["sport"]
+    level = game["level"]
+    mode = game["mode"]
+    team_a1 = game["team_a1"]
+    team_a2 = game.get("team_a2", "")
+    team_b1 = game["team_b1"]
+    team_b2 = game.get("team_b2", "")
+    score_a = int(game.get("score_a", 0))
+    score_b = int(game.get("score_b", 0))
+    notes = game.get("notes", "")
 
-    html = f"""
-    <div class="scoreboard">
-      <div class="scoreline">
-        <div class="teamname">{team_a}</div>
-        <div class="score" id="scoreA">{score_a}</div>
-        <div class="pill">{game.get("sport","")}</div>
-        <div class="score" id="scoreB">{score_b}</div>
-        <div class="teamname" style="text-align:right">{team_b}</div>
-      </div>
+    pts_a, pts_b = points_for_result(league_key, sport, level, score_a, score_b)
 
-      <div class="clock" id="clock">--:--</div>
-
-      <div class="scoreline tiny">
-        <div class="pill">League: {LEAGUE_LABELS.get(game.get("league_key",""), game.get("league_key",""))}</div>
-        <div class="pill">Level: {game.get("level","")}</div>
-        <div class="pill">Mode: {game.get("mode","1v1")}</div>
-        <div class="pill">Status: {"RUNNING" if running else "PAUSED"}</div>
-      </div>
-    </div>
-
-    <script>
-      const running = {str(running).lower()};
-      const initialRemaining = {remaining};
-      const anchor = {anchor_epoch if anchor_epoch is not None else 'null'};
-
-      function fmt(sec) {{
-        if (sec < 0) sec = 0;
-        const m = Math.floor(sec / 60);
-        const s = sec % 60;
-        return String(m).padStart(2,'0') + ":" + String(s).padStart(2,'0');
-      }}
-
-      function tick() {{
-        let rem = initialRemaining;
-        if (running && anchor !== null) {{
-          const now = Date.now() / 1000.0;
-          const elapsed = Math.floor(now - anchor);
-          rem = initialRemaining - elapsed;
-        }}
-        document.getElementById("clock").innerText = fmt(rem);
-      }}
-
-      tick();
-      setInterval(tick, 1000);
-    </script>
-    """
-    st.markdown(html, unsafe_allow_html=True)
-
-
-# =========================
-# Pages
-# =========================
-def page_setup(current_league: str) -> None:
-    st.header("Setup")
-    st.caption("Upload rosters and confirm your sheets are connected.")
-
-    if not sheets_ready():
-        st.warning(
-            "Google Sheets is not configured. Add `sheet_id` and `gcp_service_account` to Streamlit secrets."
-        )
-        return
-
-    lk = current_league
-    sheet_name = roster_sheet_name(lk)
-
-    st.subheader(f"Roster: {LEAGUE_LABELS[lk]}")
-    df = df_from_ws(sheet_name)
-
-    with st.expander("Upload roster CSV (replaces entire roster)", expanded=False):
-        st.write("CSV **must** contain columns: `player_id, first_name, last_name, team_name, bunk`")
-        up = st.file_uploader("Upload roster CSV", type=["csv"], key=f"roster_upload_{lk}")
-        if up is not None:
-            new_df = pd.read_csv(up)
-            required = {"player_id", "first_name", "last_name", "team_name", "bunk"}
-            missing = required - set(new_df.columns)
-            if missing:
-                st.error(f"Missing columns: {', '.join(sorted(missing))}")
-            else:
-                overwrite_ws(sheet_name, new_df[["player_id", "first_name", "last_name", "team_name", "bunk"]])
-                st.success("Roster updated.")
-
-    st.markdown("**Current roster**")
-    st.dataframe(df, use_container_width=True)
-
-
-def page_live_games_home(current_league: str) -> None:
-    st.header("Live Games (Create / Open)")
-    if not supabase_ready():
-        st.error("Supabase not configured. Add `supabase_url` and `supabase_anon_key` to Streamlit secrets.")
-        return
-
-    st.subheader("Create a new live game")
-    roster = roster_df(current_league)
-    teams = teams_in_roster(roster)
-    if not teams:
-        st.info("Upload a roster in Setup first (so we know team names).")
-        teams = ["Team 1", "Team 2", "Team 3", "Team 4"]
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        sport = st.selectbox("Sport", SPORTS, index=0)
-    with c2:
-        level = st.selectbox("Level", LEVELS, index=0)
-    with c3:
-        mode_key = st.selectbox("Mode", [m[0] for m in GAME_MODES], format_func=lambda x: dict(GAME_MODES)[x])
-
-    presets = SPORT_TIMER_PRESETS.get(sport, [(20 * 60 * 2, "Default 40:00")])
-    duration_seconds = st.selectbox(
-        "Timer preset",
-        [p[0] for p in presets],
-        format_func=lambda v: dict(presets)[v],
-    )
-    running_style = st.radio("Clock style", ["Non-running (stops on whistles)", "Running"], horizontal=True)
-    timer_running_default = False
-
-    st.markdown("---")
-    if mode_key == "1v1":
-        t1, t2 = st.columns(2)
-        with t1:
-            team_a1 = st.selectbox("Team A", teams, key="team_a1")
-        with t2:
-            team_b1 = st.selectbox("Team B", teams, key="team_b1")
-        team_a2 = None
-        team_b2 = None
-    else:
-        st.caption("Pick 2 teams to combine on each side.")
-        col = st.columns(4)
-        team_a1 = col[0].selectbox("A1", teams, key="team_a1_2v2")
-        team_a2 = col[1].selectbox("A2", teams, key="team_a2_2v2")
-        team_b1 = col[2].selectbox("B1", teams, key="team_b1_2v2")
-        team_b2 = col[3].selectbox("B2", teams, key="team_b2_2v2")
-
-    notes = st.text_input("Notes (optional)", value="")
-    if st.button("Create Live Game", type="primary"):
-        payload = {
-            "created_at": now_utc().isoformat(),
-            "updated_at": now_utc().isoformat(),
-            "league_key": current_league,
+    # 1) Insert into games
+    try:
+        sb.table("games").insert({
+            "id": gid,
+            "league_key": league_key,
             "sport": sport,
             "level": level,
-            "mode": mode_key,
+            "mode": mode,
+            "team_a1": team_a1,
+            "team_a2": team_a2 if team_a2 else None,
+            "team_b1": team_b1,
+            "team_b2": team_b2 if team_b2 else None,
+            "score_a": score_a,
+            "score_b": score_b,
+            "points_a": pts_a,
+            "points_b": pts_b,
+            "notes": notes
+        }).execute()
+    except Exception as e:
+        return False, f"Failed to save game: {e}"
+
+    # 2) Insert stats totals
+    active_ids = set(game.get("active_player_ids", []))
+    stats_map = game.get("player_stats", {})
+    name_map = {}
+    team_map = {}
+    if not roster_df.empty:
+        roster_df = roster_df.copy()
+        roster_df["player_id"] = roster_df["player_id"].astype(str)
+        roster_df["player_name"] = roster_df["first_name"].astype(str) + " " + roster_df["last_name"].astype(str)
+        for _, r in roster_df.iterrows():
+            pid = str(r["player_id"])
+            name_map[pid] = str(r["player_name"]).strip()
+            team_map[pid] = str(r["team_name"]).strip()
+
+    rows = []
+    for pid, m in stats_map.items():
+        if active_ids and pid not in active_ids:
+            continue
+        for stat_key, val in m.items():
+            val = int(val)
+            if val == 0:
+                continue
+            rows.append({
+                "game_id": gid,
+                "league_key": league_key,
+                "sport": sport,
+                "level": level,
+                "player_id": str(pid),
+                "player_name": name_map.get(str(pid), str(pid)),
+                "team_name": team_map.get(str(pid), ""),
+                "stat_key": stat_key,
+                "value": val
+            })
+
+    try:
+        if rows:
+            sb.table("stats").insert(rows).execute()
+    except Exception as e:
+        return False, f"Game saved, but stats failed: {e}"
+
+    return True, "Saved."
+
+# =========================
+# UI PAGES
+# =========================
+def sidebar_nav() -> Tuple[str, str]:
+    with st.sidebar:
+        st.title("League Manager")
+        try:
+            st.image(LOGO_PATH, use_container_width=True)
+        except Exception:
+            pass
+
+        league_label = st.selectbox("League", list(LEAGUES.keys()))
+        league_key = LEAGUES[league_label]
+
+        page = st.radio("Menu", [
+            "Live Games",
+            "Run Live Game",
+            "Standings",
+            "Leaderboards",
+            "Non-Game Points",
+            "Highlights",
+            "Roster Tools",
+            "Admin",
+        ])
+
+        # Connection status (useful, not “foundation”)
+        st.divider()
+        st.caption("Connections")
+        st.write("Supabase:", "✅" if supabase_ok() else "❌")
+        st.write("Google Sheets:", "✅" if gspread_client() is not None else "⚠️ (optional)")
+
+    return page, league_key
+
+def page_live_games(league_key: str):
+    st.markdown(f'<div class="title">Live Games</div>', unsafe_allow_html=True)
+    roster = load_roster(league_key)
+    if roster.empty:
+        st.warning("No roster loaded for this league yet. Go to **Roster Tools** and upload a CSV, or connect Google Sheets roster tabs.")
+        return
+
+    teams = sorted([t for t in roster["team_name"].dropna().unique().tolist() if str(t).strip()])
+
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col1:
+        sport = st.selectbox("Sport", SPORTS)
+    with col2:
+        level = st.selectbox("Level", ["A", "B", "C", "D"])
+    with col3:
+        mode_ui = st.selectbox("Mode", ["1 Team vs 1 Team", "2 Teams vs 2 Teams"])
+
+    presets = TIMER_PRESETS.get(sport, [("No timer (manual)", 0)])
+    preset_label = st.selectbox("Timer Preset", [p[0] for p in presets])
+    duration_seconds = int([p[1] for p in presets if p[0] == preset_label][0])
+
+    if mode_ui == "1 Team vs 1 Team":
+        a, b = st.columns(2)
+        with a:
+            team_a1 = st.selectbox("Team A", teams, key="t_a1")
+        with b:
+            team_b1 = st.selectbox("Team B", [t for t in teams if t != team_a1], key="t_b1")
+        team_a2 = ""
+        team_b2 = ""
+        mode = "1v1"
+    else:
+        st.caption("Pick two teams per side.")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            team_a1 = st.selectbox("A1", teams, key="t_a1_2")
+        with c2:
+            team_a2 = st.selectbox("A2", [t for t in teams if t != team_a1], key="t_a2_2")
+        with c3:
+            team_b1 = st.selectbox("B1", [t for t in teams if t not in [team_a1, team_a2]], key="t_b1_2")
+        with c4:
+            team_b2 = st.selectbox("B2", [t for t in teams if t not in [team_a1, team_a2, team_b1]], key="t_b2_2")
+        mode = "2v2"
+
+    notes = st.text_input("Notes (optional)")
+
+    if st.button("Create Live Game", type="primary"):
+        gid = new_game_id()
+        # Eligible players = teams involved
+        involved = [team_a1, team_b1] if mode == "1v1" else [team_a1, team_a2, team_b1, team_b2]
+        eligible = roster[roster["team_name"].isin(involved)].copy()
+        eligible["player_id"] = eligible["player_id"].astype(str)
+        eligible["player_name"] = eligible["first_name"].astype(str) + " " + eligible["last_name"].astype(str)
+
+        game = {
+            "game_id": gid,
+            "league_key": league_key,
+            "sport": sport,
+            "level": level,
+            "mode": mode,
             "team_a1": team_a1,
             "team_a2": team_a2,
             "team_b1": team_b1,
             "team_b2": team_b2,
+            "created_at": now_et_str(),
+            "notes": notes,
+
+            # scoreboard
             "score_a": 0,
             "score_b": 0,
-            "duration_seconds": int(duration_seconds),
-            "timer_running": bool(timer_running_default),
-            "timer_anchor_ts": None,
-            "timer_remaining_seconds": int(duration_seconds),
-            "clock_style": "running" if "Running" in running_style else "nonrunning",
-            "status": "active",
-            "notes": notes,
-        }
-        gid = sb_create_live_game(payload)
-        st.session_state["active_game_id"] = gid
-        st.success("Created. Opening game…")
-        st.rerun()
 
-    st.markdown("---")
-    st.subheader("Open an existing live game")
-    games = sb_list_live_games(status="active", limit=50)
-    if not games:
-        st.info("No active live games yet.")
+            # timer
+            "duration_seconds": duration_seconds,
+            "timer_running": False,
+            "remaining_at_pause": duration_seconds,
+            "anchor_ts": time.time(),
+            "remaining_at_anchor": duration_seconds,
+
+            # lineup & stats
+            "eligible_df": eligible[["player_id", "player_name", "team_name"]].copy(),
+            "active_player_ids": eligible["player_id"].tolist(),
+            "player_stats": {},
+        }
+
+        st.session_state.live_games[gid] = game
+        st.session_state.active_game_id = gid
+        toast_ok("Live game created.")
+        st.experimental_rerun()
+
+    st.divider()
+    st.subheader("Your Live Games (this device)")
+    if not st.session_state.live_games:
+        st.info("No live games created on this device yet.")
         return
 
-    def label(g):
-        a = g.get("team_a1","A")
-        b = g.get("team_b1","B")
-        return f"{g.get('sport')} {g.get('level')} • {LEAGUE_LABELS.get(g.get('league_key'), g.get('league_key'))} • {a} vs {b} • {g.get('created_at','')[:19]}"
+    rows = []
+    for gid, g in st.session_state.live_games.items():
+        rows.append({
+            "Game ID": gid,
+            "League": g["league_key"],
+            "Sport": g["sport"],
+            "Level": g["level"],
+            "Mode": g["mode"],
+            "A": g["team_a1"] + (f"+{g['team_a2']}" if g["mode"] == "2v2" and g.get("team_a2") else ""),
+            "B": g["team_b1"] + (f"+{g['team_b2']}" if g["mode"] == "2v2" and g.get("team_b2") else ""),
+            "Score": f"{g['score_a']} - {g['score_b']}",
+            "Created": g["created_at"],
+        })
+    df = pd.DataFrame(rows)
+    st.dataframe(df, use_container_width=True)
 
-    pick = st.selectbox("Active games", games, format_func=label)
-    if st.button("Open selected game"):
-        st.session_state["active_game_id"] = pick["id"]
-        st.rerun()
+    pick = st.selectbox("Open a live game", list(st.session_state.live_games.keys()))
+    if st.button("Open Selected Game"):
+        st.session_state.active_game_id = pick
+        st.experimental_rerun()
 
+def page_run_live_game(league_key: str):
+    st.markdown(f'<div class="title">Run Live Game</div>', unsafe_allow_html=True)
 
-def page_run_live_game(current_league: str) -> None:
-    st.header("Run Live Game")
-    if not supabase_ready():
+    gid = st.session_state.active_game_id
+    if not gid or gid not in st.session_state.live_games:
+        st.info("Go to **Live Games** to create or open a game.")
+        return
+
+    game = st.session_state.live_games[gid]
+    roster = load_roster(league_key)
+
+    # Auto tick every second only while timer is running
+    if game.get("timer_running", False) and int(game.get("duration_seconds", 0)) > 0:
+        time.sleep(1)
+        st.session_state.tick += 1
+        st.experimental_rerun()
+
+    remaining = compute_remaining(game)
+    time_str = "—" if int(game.get("duration_seconds", 0)) <= 0 else format_mm_ss(remaining)
+
+    team_a_label = game["team_a1"] + (f" + {game['team_a2']}" if game["mode"] == "2v2" and game.get("team_a2") else "")
+    team_b_label = game["team_b1"] + (f" + {game['team_b2']}" if game["mode"] == "2v2" and game.get("team_b2") else "")
+
+    # Scoreboard card
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown(f'<div class="sb-time">{time_str}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="sb-sub">{game["sport"]} • {game["level"]} • {("2v2" if game["mode"]=="2v2" else "1v1")}</div>', unsafe_allow_html=True)
+
+    st.markdown(
+        f"""
+        <div class="sb-row">
+          <div class="sb-team">
+            <div class="sb-teamname">{team_a_label}</div>
+            <div class="sb-score">{game["score_a"]}</div>
+            <div class="pill">TEAM A</div>
+          </div>
+          <div class="sb-team">
+            <div class="sb-teamname">{team_b_label}</div>
+            <div class="sb-score">{game["score_b"]}</div>
+            <div class="pill">TEAM B</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # Timer controls
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        if st.button("▶ Start / Resume", use_container_width=True):
+            timer_start(game)
+            toast_ok("Timer started.")
+            st.experimental_rerun()
+    with c2:
+        if st.button("⏸ Pause", use_container_width=True):
+            timer_pause(game)
+            toast_ok("Timer paused.")
+            st.experimental_rerun()
+    with c3:
+        if st.button("⟲ Reset Timer", use_container_width=True):
+            timer_reset(game)
+            toast_ok("Timer reset.")
+            st.experimental_rerun()
+    with c4:
+        if st.button("🧹 Reset Score", use_container_width=True):
+            game["score_a"] = 0
+            game["score_b"] = 0
+            toast_ok("Score reset.")
+            st.experimental_rerun()
+
+    st.divider()
+
+    # Score buttons
+    st.subheader("Score Controls")
+    if game["sport"] == "Basketball":
+        left, right = st.columns(2)
+        with left:
+            st.write("Team A")
+            b1, b2, b3, b4 = st.columns(4)
+            if b1.button("+1", use_container_width=True): bump_score(game, "A", 1); toast_ok("Team A +1"); st.experimental_rerun()
+            if b2.button("+2", use_container_width=True): bump_score(game, "A", 2); toast_ok("Team A +2"); st.experimental_rerun()
+            if b3.button("+3", use_container_width=True): bump_score(game, "A", 3); toast_ok("Team A +3"); st.experimental_rerun()
+            if b4.button("-1", use_container_width=True): bump_score(game, "A", -1); toast_ok("Team A -1"); st.experimental_rerun()
+        with right:
+            st.write("Team B")
+            b1, b2, b3, b4 = st.columns(4)
+            if b1.button("+1 ", use_container_width=True): bump_score(game, "B", 1); toast_ok("Team B +1"); st.experimental_rerun()
+            if b2.button("+2 ", use_container_width=True): bump_score(game, "B", 2); toast_ok("Team B +2"); st.experimental_rerun()
+            if b3.button("+3 ", use_container_width=True): bump_score(game, "B", 3); toast_ok("Team B +3"); st.experimental_rerun()
+            if b4.button("-1 ", use_container_width=True): bump_score(game, "B", -1); toast_ok("Team B -1"); st.experimental_rerun()
+    else:
+        left, right = st.columns(2)
+        with left:
+            st.write("Team A")
+            b1, b2 = st.columns(2)
+            if b1.button("+1", use_container_width=True): bump_score(game, "A", 1); toast_ok("Team A +1"); st.experimental_rerun()
+            if b2.button("-1", use_container_width=True): bump_score(game, "A", -1); toast_ok("Team A -1"); st.experimental_rerun()
+        with right:
+            st.write("Team B")
+            b1, b2 = st.columns(2)
+            if b1.button("+1 ", use_container_width=True): bump_score(game, "B", 1); toast_ok("Team B +1"); st.experimental_rerun()
+            if b2.button("-1 ", use_container_width=True): bump_score(game, "B", -1); toast_ok("Team B -1"); st.experimental_rerun()
+
+    st.divider()
+
+    # Active lineup
+    st.subheader("Active Lineup")
+    eligible_df = game["eligible_df"].copy()
+    pid_to_label = {r["player_id"]: f"{r['player_name']} — {r['team_name']}" for _, r in eligible_df.iterrows()}
+    picked = st.multiselect(
+        "Select the players actually playing (removes everyone else from the stat buttons).",
+        options=eligible_df["player_id"].tolist(),
+        default=game.get("active_player_ids", []),
+        format_func=lambda pid: pid_to_label.get(pid, pid),
+    )
+    game["active_player_ids"] = picked
+
+    st.divider()
+
+    # Player stat buttons + running totals
+    st.subheader("Player Stats")
+    stat_buttons = SPORT_STATS.get(game["sport"], [("PTS", "+1 PTS")])
+
+    active_df = eligible_df[eligible_df["player_id"].isin(game.get("active_player_ids", []))].copy()
+    active_df = active_df.sort_values(["team_name", "player_name"])
+
+    if active_df.empty:
+        st.warning("No active players selected.")
+    else:
+        for _, r in active_df.iterrows():
+            pid = r["player_id"]
+            name = r["player_name"]
+            team = r["team_name"]
+
+            cols = st.columns([2.5] + [1] * len(stat_buttons))
+            cols[0].markdown(f"**{name}**  \n_{team}_")
+
+            for i, (stat_key, label) in enumerate(stat_buttons):
+                if cols[i+1].button(label, key=f"{gid}_{pid}_{stat_key}"):
+                    bump_player_stat(game, pid, stat_key, 1)
+                    # green confirmation
+                    toast_ok(f"{name}: +1 {stat_key}")
+                    st.experimental_rerun()
+
+    st.divider()
+
+    st.subheader("This Game Totals (updates instantly)")
+    rows = []
+    stats_map = game.get("player_stats", {})
+    for _, r in active_df.iterrows():
+        pid = r["player_id"]
+        row = {"Player": r["player_name"], "Team": r["team_name"]}
+        for sk, _lbl in stat_buttons:
+            row[sk] = int(stats_map.get(pid, {}).get(sk, 0))
+        rows.append(row)
+    if rows:
+        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
+    st.divider()
+    st.subheader("Finalize & Save")
+    st.caption("This saves the completed game and all stats to Supabase. Your live scoring stays fast and reliable.")
+
+    game["notes"] = st.text_area("Notes (optional)", value=game.get("notes", ""))
+
+    if st.button("✅ Finalize & Save Game", type="primary"):
+        # pause timer to lock time
+        timer_pause(game)
+        ok, msg = finalize_to_supabase(game, roster)
+        if ok:
+            toast_ok("Game saved successfully.")
+        else:
+            toast_err(msg)
+
+def page_standings(league_key: str):
+    st.markdown(f'<div class="title">Standings</div>', unsafe_allow_html=True)
+    roster = load_roster(league_key)
+    if roster.empty:
+        st.warning("No roster loaded for this league yet.")
+        return
+
+    teams = sorted([t for t in roster["team_name"].dropna().unique().tolist() if str(t).strip()])
+    include_nongame = st.toggle("Include non-game points in totals", value=True)
+
+    # Pull from Supabase for reliability
+    sb = supabase_client()
+    if sb is None:
         st.error("Supabase not configured.")
         return
 
-    gid = st.session_state.get("active_game_id")
-    if not gid:
-        st.info("Go to **Live Games (Create/Open)** and create or open a game.")
+    try:
+        games = sb.table("games").select("*").eq("league_key", league_key).execute().data
+        ng = sb.table("nongamepoints").select("*").eq("league_key", league_key).execute().data
+    except Exception as e:
+        st.error(f"Supabase read error: {e}")
         return
 
-    game = sb_get_live_game(gid)
-    if not game:
-        st.error("That game no longer exists.")
+    # Compute points + W/L/T
+    pts_game = {t: 0.0 for t in teams}
+    w = {t: 0 for t in teams}
+    l = {t: 0 for t in teams}
+    t_ = {t: 0 for t in teams}
+    pts_ng = {t: 0.0 for t in teams}
+
+    for g in games or []:
+        mode = g.get("mode", "1v1")
+        a_teams = [g.get("team_a1")] + ([g.get("team_a2")] if mode == "2v2" else [])
+        b_teams = [g.get("team_b1")] + ([g.get("team_b2")] if mode == "2v2" else [])
+        a_teams = [x for x in a_teams if x]
+        b_teams = [x for x in b_teams if x]
+        pa = float(g.get("points_a", 0))
+        pb = float(g.get("points_b", 0))
+        sa = int(g.get("score_a", 0))
+        sb_ = int(g.get("score_b", 0))
+
+        for team in a_teams:
+            if team in pts_game:
+                pts_game[team] += pa / max(1, len(a_teams))
+        for team in b_teams:
+            if team in pts_game:
+                pts_game[team] += pb / max(1, len(b_teams))
+
+        if sa > sb_:
+            for team in a_teams:
+                if team in w: w[team] += 1
+            for team in b_teams:
+                if team in l: l[team] += 1
+        elif sb_ > sa:
+            for team in b_teams:
+                if team in w: w[team] += 1
+            for team in a_teams:
+                if team in l: l[team] += 1
+        else:
+            for team in a_teams + b_teams:
+                if team in t_: t_[team] += 1
+
+    for row in ng or []:
+        team = str(row.get("team_name", "")).strip()
+        pts = float(row.get("points", 0))
+        if team in pts_ng:
+            pts_ng[team] += pts
+
+    rows = []
+    for team in teams:
+        total = pts_game[team] + (pts_ng[team] if include_nongame else 0.0)
+        rows.append({
+            "Team": team,
+            "W": w[team],
+            "L": l[team],
+            "T": t_[team],
+            "Game Pts": round(pts_game[team], 1),
+            "Non-Game Pts": round(pts_ng[team], 1),
+            "Total Pts": round(total, 1),
+        })
+    df = pd.DataFrame(rows).sort_values(["Total Pts", "W"], ascending=False)
+    st.dataframe(df, use_container_width=True)
+
+def page_leaderboards(league_key: str):
+    st.markdown(f'<div class="title">Leaderboards</div>', unsafe_allow_html=True)
+    sb = supabase_client()
+    if sb is None:
+        st.error("Supabase not configured.")
         return
 
-    if game.get("status") != "active":
-        st.warning("This game is not active.")
-    inject_css()
-    scoreboard_widget(game)
+    try:
+        stats = sb.table("stats").select("*").eq("league_key", league_key).execute().data
+    except Exception as e:
+        st.error(f"Supabase read error: {e}")
+        return
 
-    # ---- Controls row
-    c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
-    with c1:
-        if st.button("▶ Start", use_container_width=True):
-            set_timer_running(gid, True)
-            st.rerun()
-    with c2:
-        if st.button("⏸ Pause", use_container_width=True):
-            set_timer_running(gid, False)
-            st.rerun()
-    with c3:
-        if st.button("↺ Reset", use_container_width=True):
-            reset_timer(gid)
-            st.rerun()
-    with c4:
-        st.caption("Tip: the big clock ticks every second on its own (client-side), no refresh spam.")
+    if not stats:
+        st.info("No stats saved yet.")
+        return
 
-    st.markdown("---")
-    # ---- Score buttons
-    st.subheader("Score")
-    sport = game.get("sport", "Basketball")
-    buttons = SCORE_BUTTONS.get(sport, [1, -1])
+    df = pd.DataFrame(stats)
+    sport = st.selectbox("Sport", sorted(df["sport"].unique().tolist()))
+    df = df[df["sport"] == sport].copy()
+    stat_key = st.selectbox("Category", sorted(df["stat_key"].unique().tolist()))
+    df = df[df["stat_key"] == stat_key].copy()
 
-    left, right = st.columns(2)
-    with left:
-        st.write(f"**{game.get('team_a1','Team A')}**")
-        cols = st.columns(len(buttons))
-        for i, delta in enumerate(buttons):
-            label = f"{delta:+d}"
-            if cols[i].button(label, key=f"scoreA_{delta}"):
-                update_score(gid, "A", delta)
-                st.toast(f"Score A {delta:+d}", icon="✅")
-                st.rerun()
+    board = df.groupby(["player_name", "team_name"], as_index=False)["value"].sum()
+    board = board.sort_values("value", ascending=False).head(25)
+    board = board.rename(columns={"player_name": "Player", "team_name": "Team", "value": "Total"})
+    st.dataframe(board, use_container_width=True)
 
-    with right:
-        st.write(f"**{game.get('team_b1','Team B')}**")
-        cols = st.columns(len(buttons))
-        for i, delta in enumerate(buttons):
-            label = f"{delta:+d}"
-            if cols[i].button(label, key=f"scoreB_{delta}"):
-                update_score(gid, "B", delta)
-                st.toast(f"Score B {delta:+d}", icon="✅")
-                st.rerun()
-
-    st.markdown("---")
-    # ---- Stats buttons
-    st.subheader("Stats (tap to add)")
-    roster = roster_df(game.get("league_key", current_league))
+def page_non_game_points(league_key: str):
+    st.markdown(f'<div class="title">Non-Game Points</div>', unsafe_allow_html=True)
+    roster = load_roster(league_key)
     if roster.empty:
-        st.info("No roster loaded for this league yet.")
+        st.warning("No roster loaded for this league yet.")
+        return
+    teams = sorted([t for t in roster["team_name"].dropna().unique().tolist() if str(t).strip()])
+
+    sb = supabase_client()
+    if sb is None:
+        st.error("Supabase not configured.")
         return
 
-    # Active lineup selection (so you only see the players in THIS game)
-    teams = teams_in_roster(roster)
-    mode = game.get("mode", "1v1")
-    if mode == "1v1":
-        teams_in_game = [game.get("team_a1"), game.get("team_b1")]
-    else:
-        teams_in_game = [game.get("team_a1"), game.get("team_a2"), game.get("team_b1"), game.get("team_b2")]
-    teams_in_game = [t for t in teams_in_game if t]
+    category = st.selectbox("Category", [
+        "League Spirit",
+        "Sportsmanship",
+        "Cleanup / Organization",
+        "Participation / Effort",
+        "Other",
+    ])
+    team = st.selectbox("Team", teams)
+    reason = st.text_input("Reason / Details")
+    points = st.number_input("Points", min_value=-100, max_value=100, value=1, step=1)
 
-    st.caption("Active lineup: pick who is actually playing (so you don't see the entire league).")
-    lineup_default = st.session_state.get("lineup_players", [])
-    all_players = roster[roster["team_name"].isin(teams_in_game)].copy()
-    all_players["label"] = all_players.apply(player_label, axis=1)
-    options = all_players["label"].tolist()
+    if st.button("Add Points", type="primary"):
+        try:
+            sb.table("nongamepoints").insert({
+                "league_key": league_key,
+                "team_name": team,
+                "category": category,
+                "reason": reason,
+                "points": int(points),
+            }).execute()
+            toast_ok("Non-game points added.")
+        except Exception as e:
+            toast_err(f"Save failed: {e}")
 
-    lineup = st.multiselect(
-        "Players in this game",
-        options=options,
-        default=[x for x in lineup_default if x in options],
-        key="lineup_select",
-    )
-    st.session_state["lineup_players"] = lineup
-
-    # map label -> row
-    by_label = {row["label"]: row for _, row in all_players.iterrows()}
-
-    stat_keys = SPORT_STATS.get(sport, ["PTS"])
-    if not lineup:
-        st.info("Select players in the lineup to show stat buttons.")
-    else:
-        # quick stat UI: each player gets a row of buttons
-        for lab in lineup:
-            row = by_label[lab]
-            pid = str(row["player_id"])
-            tname = str(row["team_name"])
-            cols = st.columns([3] + [1] * len(stat_keys))
-            cols[0].write(f"**{lab}**")
-            for i, sk in enumerate(stat_keys):
-                if cols[i + 1].button(sk, key=f"stat_{pid}_{sk}"):
-                    add_stat(gid, pid, tname, sk, 1)
-                    st.toast(f"{sk} +1 for {lab}", icon="✅")
-                    st.rerun()
-
-    # ---- Live stat table (updates on every press because we rerun)
-    st.markdown("---")
-    st.subheader("This game: live stat totals")
-    events = sb_list_events(gid)
-    piv = aggregated_stats(events)
-    if piv.empty:
-        st.caption("No stats yet.")
-    else:
-        st.dataframe(piv, use_container_width=True)
-
-    st.markdown("---")
-    st.subheader("Event log (for this game)")
-    if events:
-        df_e = pd.DataFrame(events)
-        show_cols = [c for c in ["created_at", "event_type", "side", "delta", "player_id", "team_name", "stat_key"] if c in df_e.columns]
-        st.dataframe(df_e[show_cols].tail(200), use_container_width=True)
-    else:
-        st.caption("No events yet.")
-
-    st.markdown("---")
-    st.subheader("Finish / Save game")
-    st.caption("This will mark the live game as finished. (Hook up post-game write to Sheets here if desired.)")
-
-    if st.button("✅ Finish Game", type="primary"):
-        # Pause and mark finished
-        set_timer_running(gid, False)
-        sb_upsert_live_game(
-            gid,
-            {
-                "updated_at": now_utc().isoformat(),
-                "status": "finished",
-                "timer_running": False,
-                "timer_anchor_ts": None,
-                "timer_remaining_seconds": compute_remaining(sb_get_live_game(gid) or game),
-            },
-        )
-        st.success("Game finished.")
-        st.session_state.pop("active_game_id", None)
-        st.rerun()
-
-
-def page_standings(current_league: str) -> None:
-    st.header("Standings")
-    if not sheets_ready():
-        st.warning("Sheets not configured.")
+    st.divider()
+    try:
+        rows = sb.table("nongamepoints").select("*").eq("league_key", league_key).order("created_at", desc=True).execute().data
+    except Exception as e:
+        st.error(f"Supabase read error: {e}")
         return
-    # This assumes you already have a sheet tab called "games" with at least:
-    # league_key, sport, level, team_a, team_b, winner_team
-    df = df_from_ws("games")
-    if df.empty:
-        st.info("No games yet.")
+    if not rows:
+        st.info("No entries yet.")
+        return
+    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
+def page_highlights(league_key: str):
+    st.markdown(f'<div class="title">Highlights</div>', unsafe_allow_html=True)
+    sb = supabase_client()
+    if sb is None:
+        st.error("Supabase not configured.")
         return
 
-    # Filter to selected league
-    df = df[df.get("league_key", "") == current_league].copy()
-    if df.empty:
-        st.info("No games yet for this league.")
+    uploaded = st.file_uploader("Upload a highlight video file", type=["mp4", "mov", "m4v"])
+    st.caption("This version logs filenames for the day. If you want cloud storage + playback, we can add Supabase Storage next.")
+
+    if uploaded is not None:
+        # For now, store filename in DB. (Storage can come next.)
+        if st.button("Save Highlight Entry", type="primary"):
+            try:
+                sb.table("highlights").insert({
+                    "league_key": league_key,
+                    "filename": uploaded.name,
+                }).execute()
+                toast_ok("Highlight entry saved.")
+            except Exception as e:
+                toast_err(f"Save failed: {e}")
+
+    st.divider()
+    try:
+        rows = sb.table("highlights").select("*").eq("league_key", league_key).order("created_at", desc=True).execute().data
+    except Exception as e:
+        st.error(f"Supabase read error: {e}")
+        return
+    if not rows:
+        st.info("No highlights logged yet.")
+        return
+    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
+def page_roster_tools(league_key: str):
+    st.markdown(f'<div class="title">Roster Tools</div>', unsafe_allow_html=True)
+    st.caption("You can pull rosters from Google Sheets or upload a CSV as a backup.")
+
+    df = load_roster_from_sheets(league_key)
+    if not df.empty:
+        st.success("Roster loaded from Google Sheets.")
+        st.dataframe(df, use_container_width=True)
+    else:
+        st.warning("Google Sheets roster not available for this league (or not configured).")
+
+    st.divider()
+    st.subheader("Upload roster CSV (backup)")
+    st.caption("Required columns: player_id, first_name, last_name, team_name, bunk")
+
+    file = st.file_uploader("Upload CSV", type=["csv"])
+    if file is not None:
+        try:
+            df_new = pd.read_csv(file)
+            needed = ["player_id", "first_name", "last_name", "team_name", "bunk"]
+            missing = [c for c in needed if c not in df_new.columns]
+            if missing:
+                st.error(f"Missing columns: {', '.join(missing)}")
+                return
+            df_new = df_new[needed].copy()
+            df_new["player_id"] = df_new["player_id"].astype(str)
+            st.session_state[f"roster_df_{league_key}"] = df_new
+            toast_ok("Roster loaded from CSV for this session.")
+            st.dataframe(df_new, use_container_width=True)
+        except Exception as e:
+            st.error(f"CSV error: {e}")
+
+def page_admin():
+    st.markdown(f'<div class="title">Admin</div>', unsafe_allow_html=True)
+    pw = st.text_input("Admin password", type="password")
+    if pw != "Hyaffa26":
+        st.info("Enter password to access admin tools.")
         return
 
-    # Compute points
-    # Expect columns: team_a, team_b, winner_team, sport, level
-    for col in ["team_a", "team_b", "winner_team", "sport", "level"]:
-        if col not in df.columns:
-            st.error(f"Sheet 'games' is missing column: {col}")
-            return
+    sb = supabase_client()
+    if sb is None:
+        st.error("Supabase not configured.")
+        return
 
-    teams = sorted(set(df["team_a"].tolist() + df["team_b"].tolist()))
-    pts = {t: 0 for t in teams}
-    for _, r in df.iterrows():
-        sport = str(r["sport"])
-        lvl = str(r["level"])
-        winner = str(r["winner_team"])
-        p = POINTS.get(current_league, {}).get(sport, {}).get(lvl, 0)
-        if winner in pts:
-            pts[winner] += int(p)
+    st.success("Admin unlocked.")
+    action = st.selectbox("Action", [
+        "Delete a saved game (Supabase)",
+        "Clear ALL saved games (Supabase)",
+        "Clear ALL saved stats (Supabase)",
+        "Clear non-game points (Supabase)",
+        "Clear highlights log (Supabase)",
+    ])
 
-    out = pd.DataFrame({"team": list(pts.keys()), "points": list(pts.values())}).sort_values("points", ascending=False)
-    st.dataframe(out, use_container_width=True)
+    if action == "Delete a saved game (Supabase)":
+        game_id = st.text_input("Game ID (uuid hex from your session)")
+        if st.button("Delete Game", type="primary"):
+            try:
+                sb.table("games").delete().eq("id", game_id).execute()
+                sb.table("stats").delete().eq("game_id", game_id).execute()
+                toast_ok("Deleted.")
+            except Exception as e:
+                toast_err(f"Delete failed: {e}")
 
+    if action == "Clear ALL saved games (Supabase)":
+        if st.button("Clear games table", type="primary"):
+            try:
+                sb.table("games").delete().neq("league_key", "___nope___").execute()
+                toast_ok("Games cleared.")
+            except Exception as e:
+                toast_err(f"Clear failed: {e}")
 
-def page_highlights() -> None:
-    st.header("Highlights")
-    st.caption("Phase: store video uploads to Supabase Storage (recommended).")
-    st.info("We can wire this to Supabase Storage next. For now, this page is a placeholder.")
-    st.file_uploader("Upload highlight video file", type=["mp4", "mov", "m4v"])
-    st.write("When we wire storage: upload -> store public URL -> display playlist on Display Board.")
+    if action == "Clear ALL saved stats (Supabase)":
+        if st.button("Clear stats table", type="primary"):
+            try:
+                sb.table("stats").delete().neq("league_key", "___nope___").execute()
+                toast_ok("Stats cleared.")
+            except Exception as e:
+                toast_err(f"Clear failed: {e}")
 
+    if action == "Clear non-game points (Supabase)":
+        if st.button("Clear nongamepoints table", type="primary"):
+            try:
+                sb.table("nongamepoints").delete().neq("league_key", "___nope___").execute()
+                toast_ok("Non-game points cleared.")
+            except Exception as e:
+                toast_err(f"Clear failed: {e}")
 
-def page_admin() -> None:
-    st.header("Admin / Clear Data")
-    st.caption("This page is intentionally minimal in this foundation build.")
-    if st.button("Clear local session (does NOT delete database)"):
-        for k in list(st.session_state.keys()):
-            st.session_state.pop(k, None)
-        st.success("Session cleared.")
-        st.rerun()
-
-
-def page_display_board() -> None:
-    st.header("Display Board (TV Mode)")
-    st.caption("Foundation build: single board with options. We'll add full-screen routes next.")
-    league = st.selectbox("League to display", LEAGUE_KEYS, format_func=lambda k: LEAGUE_LABELS[k])
-    view = st.selectbox("Display", ["Standings", "Live Game Clock", "Highlights"])
-
-    if view == "Standings":
-        page_standings(league)
-    elif view == "Live Game Clock":
-        if not supabase_ready():
-            st.error("Supabase not configured.")
-            return
-        games = sb_list_live_games(status="active", limit=30)
-        if not games:
-            st.info("No active games.")
-            return
-        pick = st.selectbox("Pick an active game", games, format_func=lambda g: f"{g.get('sport')} • {g.get('team_a1')} vs {g.get('team_b1')}")
-        inject_css()
-        scoreboard_widget(pick)
-        st.caption("Put this page in full-screen on the TV.")
-    else:
-        page_highlights()
-
+    if action == "Clear highlights log (Supabase)":
+        if st.button("Clear highlights table", type="primary"):
+            try:
+                sb.table("highlights").delete().neq("league_key", "___nope___").execute()
+                toast_ok("Highlights cleared.")
+            except Exception as e:
+                toast_err(f"Clear failed: {e}")
 
 # =========================
-# Main
+# MAIN
 # =========================
-def main() -> None:
+def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     inject_css()
+    init_state()
 
-    # Sidebar
-    st.sidebar.markdown(f"<div class='bc-title'>League Manager</div>", unsafe_allow_html=True)
-    st.sidebar.markdown("<div class='bc-subtitle'>Crest League • Live engine (Supabase)</div>", unsafe_allow_html=True)
-    try:
-        st.sidebar.image(LOGO_PATH, use_container_width=True)
-    except Exception:
-        pass
+    page, league_key = sidebar_nav()
 
-    # League selector (affects Setup + standings + roster-dependent pages)
-    current_league = st.sidebar.selectbox(
-        "League (for Setup/Stats)",
-        LEAGUE_KEYS,
-        format_func=lambda k: LEAGUE_LABELS[k],
-        index=2,
-    )
-
-    st.sidebar.markdown("---")
-    page = st.sidebar.radio(
-        "Go to",
-        [
-            "Setup",
-            "Live Games (Create/Open)",
-            "Run Live Game",
-            "Standings",
-            "Highlights",
-            "Display Board",
-            "Admin / Clear Data",
-        ],
-    )
-
-    # Quick health checks
-    with st.sidebar.expander("Connections", expanded=False):
-        st.write("Sheets:", "✅" if sheets_ready() else "⚠️ not configured")
-        st.write("Supabase:", "✅" if supabase_ready() else "⚠️ not configured")
-        if supabase_ready():
-            st.caption("Supabase is used for live games so multiple games can run at once.")
-        if sheets_ready():
-            st.caption("Google Sheets can still store rosters / post-game results.")
-
-    # Routes
-    if page == "Setup":
-        page_setup(current_league)
-    elif page == "Live Games (Create/Open)":
-        page_live_games_home(current_league)
+    if page == "Live Games":
+        page_live_games(league_key)
     elif page == "Run Live Game":
-        page_run_live_game(current_league)
+        page_run_live_game(league_key)
     elif page == "Standings":
-        page_standings(current_league)
+        page_standings(league_key)
+    elif page == "Leaderboards":
+        page_leaderboards(league_key)
+    elif page == "Non-Game Points":
+        page_non_game_points(league_key)
     elif page == "Highlights":
-        page_highlights()
-    elif page == "Display Board":
-        page_display_board()
-    else:
+        page_highlights(league_key)
+    elif page == "Roster Tools":
+        page_roster_tools(league_key)
+    elif page == "Admin":
         page_admin()
-
 
 if __name__ == "__main__":
     main()
