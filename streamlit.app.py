@@ -832,10 +832,10 @@ def page_run_live_game(current_league: str) -> None:
     inject_css()
     scoreboard_widget(game)
 
-    if not gid:
-    st.error("No live game selected. Go to Live Games (Create/Open) and open one first.")
-    st.stop()
-
+     if not gid:
+        st.error("No live game selected. Go to Live Games (Create/Open) and open one first.")
+        st.stop()    
+    
     # ---- Controls row
     c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
     with c1:
