@@ -374,7 +374,12 @@ def sb_upsert_live_game(game_id: str, payload: dict) -> None:
         raise RuntimeError("Supabase not configured.")
     payload = dict(payload)
     payload["id"] = game_id
-    sb.table("live_games").upsert(payload).execute()
+
+def sb_update_live_game(game_id: str, payload: dict):
+    # Update ONLY. If the row doesn't exist, it should error clearly.
+    payload = dict(payload or {})
+    payload["id"] = game_id
+    return sb.table("live_games").update(payload).eq("id", game_id).execute()
 
 
 def sb_create_live_game(payload: dict) -> str:
@@ -526,7 +531,7 @@ def set_timer_running(game_id: str, running: bool) -> None:
         "timer_remaining_seconds": int(cur_remaining),
         "timer_anchor_ts": time.time() if running else None,
     }
-    sb_upsert_live_game(game_id, payload)
+    sb_update_live_game(game_id, payload)
 
 
 def reset_timer(game_id: str) -> None:
@@ -540,7 +545,7 @@ def reset_timer(game_id: str) -> None:
         "timer_remaining_seconds": int(dur),
         "timer_anchor_ts": None,
     }
-    sb_upsert_live_game(game_id, payload)
+    sb_update_live_game(game_id, payload)
 
 
 def update_score(game_id: str, side: str, delta: int) -> None:
@@ -826,6 +831,10 @@ def page_run_live_game(current_league: str) -> None:
         st.warning("This game is not active.")
     inject_css()
     scoreboard_widget(game)
+
+    if not gid:
+    st.error("No live game selected. Go to Live Games (Create/Open) and open one first.")
+    st.stop()
 
     # ---- Controls row
     c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
