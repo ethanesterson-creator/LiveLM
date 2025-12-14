@@ -27,13 +27,13 @@ except Exception:  # pragma: no cover
 # =========================
 # Branding
 # =========================
-BAUERCREST_NAVY = "#0B1F3B"
+BAUERCREST_NAVY = "#ffffff"
 BAUERCREST_GOLD = "#D4AF37"
 
 APP_TITLE = "Bauercrest Crest League Manager (Live)"
 
 # If you have a local logo file in your repo, keep this path
-LOGO_PATH = "bauercrest_logo.png"  # adjust if needed
+LOGO_PATH = "logo-header-2.png"  # adjust if needed
 
 
 # =========================
@@ -1293,7 +1293,7 @@ def main() -> None:
     inject_css()
 
     # Sidebar
-    st.sidebar.markdown(f"<div class='bc-title'>Manager</div>", unsafe_allow_html=True)
+    st.sidebar.markdown(f"<div class='bc-title'>League Manager</div>", unsafe_allow_html=True)
     st.sidebar.markdown("<div class='bc-subtitle'>Crest League • Live engine (Supabase)</div>", unsafe_allow_html=True)
     try:
         st.sidebar.image(LOGO_PATH, use_container_width=True)
