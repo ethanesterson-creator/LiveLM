@@ -295,12 +295,38 @@ def sheets_ready() -> bool:
     return get_gspread_client() is not None and "sheet_id" in st.secrets
 
 
+def canonical_ws_name(name: str) -> str:
+    # Central place to map “code names” to the actual tab names in your Sheet.
+    mapping = {
+        "Highlights": "Highlights",
+        "highlights": "Highlights",
+        "NonGamePoints": "NonGamePoints",
+        "nongamepoints": "NonGamePoints",
+        "rosters_sophomore": "rosters_sophomore",
+        "rosters_junior": "rosters_junior",
+        "rosters_senior": "rosters_senior",
+        "games": "games",
+        "stats": "stats",
+    }
+    return mapping.get(name, name)
+
+
 def ws(name: str):
     gc = get_gspread_client()
     if gc is None:
         raise RuntimeError("Google Sheets not configured.")
     sh = gc.open_by_key(st.secrets["sheet_id"])
-    return sh.worksheet(name)
+    cname = canonical_ws_name(name)
+    try:
+        return sh.worksheet(cname)
+    except Exception:
+        # try a couple of common fallbacks (case differences)
+        for alt in {cname.title(), cname.upper(), cname.lower()}:
+            try:
+                return sh.worksheet(alt)
+            except Exception:
+                pass
+        raise
 
 
 def df_from_ws(name: str) -> pd.DataFrame:
@@ -411,12 +437,25 @@ def sb_list_events(game_id: str, limit: int = 500) -> List[dict]:
 # =========================
 # Rosters
 # =========================
+def normalize_league_key(k: str) -> str:
+    k = (k or "").strip().lower()
+    # accept common misspellings / labels
+    if k in {"sophmore", "sophomore", "soph"}:
+        return "sophomore"
+    if k in {"jr", "junior"}:
+        return "junior"
+    if k in {"sr", "senior", "seniors"}:
+        return "senior"
+    return k
+
+
 def roster_sheet_name(league_key: str) -> str:
-    if league_key == "sophmore":
-        return "rosters_sophmore"
-    if league_key == "junior":
+    lk = normalize_league_key(league_key)
+    if lk == "sophomore":
+        return "rosters_sophomore"
+    if lk == "junior":
         return "rosters_junior"
-    return "rosters_seniors"
+    return "rosters_senior"
 
 
 def roster_df(league_key: str) -> pd.DataFrame:
@@ -929,63 +968,38 @@ def page_standings(current_league: str) -> None:
     if not sheets_ready():
         st.warning("Sheets not configured.")
         return
-
+    # This assumes you already have a sheet tab called "games" with at least:
+    # league_key, sport, level, team_a, team_b, winner_team
     df = df_from_ws("games")
     if df.empty:
         st.info("No games yet.")
         return
 
-    # Filter league
-    if "league_key" not in df.columns:
-        st.error("Sheet 'games' missing column: league_key")
-        return
-    df = df[df["league_key"] == current_league].copy()
+    # Filter to selected league
+    df = df[df.get("league_key", "") == current_league].copy()
     if df.empty:
         st.info("No games yet for this league.")
         return
 
-    # Required columns for YOUR sheet
-    required = {"team_a1", "team_a2", "team_b1", "team_b2", "points_a", "points_b", "mode"}
-    missing = required - set(df.columns)
-    if missing:
-        st.error(f"Sheet 'games' missing columns: {', '.join(sorted(missing))}")
-        return
-
-    # numeric points
-    df["points_a"] = pd.to_numeric(df["points_a"], errors="coerce").fillna(0).astype(int)
-    df["points_b"] = pd.to_numeric(df["points_b"], errors="coerce").fillna(0).astype(int)
-
-    totals = {}
-
-    def add_points(team, pts):
-        if not team or str(team).strip() == "":
+    # Compute points
+    # Expect columns: team_a, team_b, winner_team, sport, level
+    for col in ["team_a", "team_b", "winner_team", "sport", "level"]:
+        if col not in df.columns:
+            st.error(f"Sheet 'games' is missing column: {col}")
             return
-        totals[team] = totals.get(team, 0) + int(pts)
 
+    teams = sorted(set(df["team_a"].tolist() + df["team_b"].tolist()))
+    pts = {t: 0 for t in teams}
     for _, r in df.iterrows():
-        mode = str(r.get("mode", "1v1"))
-        a1, a2 = str(r.get("team_a1","")).strip(), str(r.get("team_a2","")).strip()
-        b1, b2 = str(r.get("team_b1","")).strip(), str(r.get("team_b2","")).strip()
-        pa, pb = int(r["points_a"]), int(r["points_b"])
+        sport = str(r["sport"])
+        lvl = str(r["level"])
+        winner = str(r["winner_team"])
+        p = POINTS.get(current_league, {}).get(sport, {}).get(lvl, 0)
+        if winner in pts:
+            pts[winner] += int(p)
 
-        if mode == "2v2":
-            # split points evenly across the 2 teams on each side (if present)
-            a_teams = [t for t in [a1, a2] if t]
-            b_teams = [t for t in [b1, b2] if t]
-            if a_teams:
-                share = pa // len(a_teams)
-                for t in a_teams: add_points(t, share)
-            if b_teams:
-                share = pb // len(b_teams)
-                for t in b_teams: add_points(t, share)
-        else:
-            add_points(a1, pa)
-            add_points(b1, pb)
-
-    out = pd.DataFrame({"team": list(totals.keys()), "points": list(totals.values())})
-    out = out.sort_values("points", ascending=False).reset_index(drop=True)
+    out = pd.DataFrame({"team": list(pts.keys()), "points": list(pts.values())}).sort_values("points", ascending=False)
     st.dataframe(out, use_container_width=True)
-
 
 
 def page_highlights() -> None:
@@ -996,43 +1010,284 @@ def page_highlights() -> None:
     st.write("When we wire storage: upload -> store public URL -> display playlist on Display Board.")
 
 
+def clear_ws_keep_header(tab: str) -> None:
+    w = ws(tab)
+    header = w.row_values(1)
+    w.clear()
+    if header:
+        w.update("A1", [header])
+
+
+def supabase_delete_all(table: str) -> None:
+    sb = get_supabase()
+    if sb is None:
+        return
+    # PostgREST doesn't support TRUNCATE; delete with a wide filter.
+    # Assumes created_at exists; if not, fall back to deleting everything via neq on a constant.
+    try:
+        sb.table(table).delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
+    except Exception:
+        sb.table(table).delete().neq("league_key", "__never__").execute()
+
+
 def page_admin() -> None:
-    st.header("Admin / Clear Data")
-    st.caption("This page is intentionally minimal in this foundation build.")
-    if st.button("Clear local session (does NOT delete database)"):
+    st.header("Admin")
+    st.caption("Password-protected tools to manage Crest League data (Google Sheets + Supabase live engine).")
+
+    # --- Password gate ---
+    if "admin_ok" not in st.session_state:
+        st.session_state.admin_ok = False
+
+    if not st.session_state.admin_ok:
+        pw = st.text_input("Admin password", type="password")
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            if st.button("Unlock"):
+                if pw == "Hyaffa26":
+                    st.session_state.admin_ok = True
+                    st.success("Admin unlocked.")
+                else:
+                    st.error("Incorrect password.")
+        st.stop()
+
+    st.success("Admin unlocked.")
+
+    st.subheader("Clear data")
+    st.warning("These actions permanently delete data. Use carefully.")
+
+    clear_targets = st.multiselect(
+        "Select what to clear",
+        [
+            "Supabase: live_games + live_events (Live Engine)",
+            "Sheet: games",
+            "Sheet: stats",
+            "Sheet: NonGamePoints",
+            "Sheet: Highlights",
+            "Sheet: rosters (all leagues)",
+        ],
+        default=[],
+    )
+
+    confirm = st.text_input("Type CLEAR to enable delete buttons", value="")
+
+    colA, colB = st.columns(2)
+
+    with colA:
+        if st.button("Clear selected", disabled=(confirm.strip() != "CLEAR" or not clear_targets)):
+            try:
+                if "Supabase: live_games + live_events (Live Engine)" in clear_targets:
+                    # delete events first due to FK
+                    supabase_delete_all("live_events")
+                    supabase_delete_all("live_games")
+
+                if "Sheet: games" in clear_targets:
+                    clear_ws_keep_header("games")
+                if "Sheet: stats" in clear_targets:
+                    clear_ws_keep_header("stats")
+                if "Sheet: NonGamePoints" in clear_targets:
+                    clear_ws_keep_header("NonGamePoints")
+                if "Sheet: Highlights" in clear_targets:
+                    clear_ws_keep_header("Highlights")
+
+                if "Sheet: rosters (all leagues)" in clear_targets:
+                    clear_ws_keep_header("rosters_sophomore")
+                    clear_ws_keep_header("rosters_junior")
+                    clear_ws_keep_header("rosters_senior")
+
+                st.success("Done.")
+            except Exception as e:
+                st.error(f"Admin action failed: {e}")
+
+    with colB:
+        if st.button("Lock admin"):
+            st.session_state.admin_ok = False
+            st.info("Admin locked.")
+
+    st.divider()
+    st.subheader("Local app session")
+    if st.button("Clear local session (does NOT delete Sheets/Supabase)"):
         for k in list(st.session_state.keys()):
             st.session_state.pop(k, None)
-        st.success("Session cleared.")
-        st.rerun()
+        st.success("Local session cleared.")
+
+def standings_table(df_games: pd.DataFrame, league_key: Optional[str] = None) -> pd.DataFrame:
+    if df_games.empty:
+        return pd.DataFrame(columns=["team", "points"])
+
+    df = df_games.copy()
+
+    if "league_key" in df.columns:
+        df["league_key_norm"] = df["league_key"].apply(normalize_league_key)
+        if league_key:
+            df = df[df["league_key_norm"] == normalize_league_key(league_key)]
+    else:
+        df["league_key_norm"] = ""
+
+    required = {"team_a1", "team_a2", "team_b1", "team_b2", "points_a", "points_b", "mode"}
+    if not required.issubset(set(df.columns)):
+        return pd.DataFrame(columns=["team", "points"])
+
+    df["points_a"] = pd.to_numeric(df["points_a"], errors="coerce").fillna(0).astype(int)
+    df["points_b"] = pd.to_numeric(df["points_b"], errors="coerce").fillna(0).astype(int)
+
+    totals: Dict[str, int] = {}
+
+    def add(team: str, pts: int):
+        team = str(team or "").strip()
+        if not team:
+            return
+        totals[team] = totals.get(team, 0) + int(pts)
+
+    for _, r in df.iterrows():
+        mode = str(r.get("mode", "1v1")).strip()
+        a1, a2 = str(r.get("team_a1", "")).strip(), str(r.get("team_a2", "")).strip()
+        b1, b2 = str(r.get("team_b1", "")).strip(), str(r.get("team_b2", "")).strip()
+        pa, pb = int(r["points_a"]), int(r["points_b"])
+
+        if mode == "2v2":
+            a_teams = [t for t in [a1, a2] if t]
+            b_teams = [t for t in [b1, b2] if t]
+            if a_teams:
+                share = pa / max(1, len(a_teams))
+                for t in a_teams:
+                    add(t, share)
+            if b_teams:
+                share = pb / max(1, len(b_teams))
+                for t in b_teams:
+                    add(t, share)
+        else:
+            add(a1, pa)
+            add(b1, pb)
+
+    out = pd.DataFrame({"team": list(totals.keys()), "points": list(totals.values())})
+    out["points"] = pd.to_numeric(out["points"], errors="coerce").fillna(0)
+    out = out.sort_values("points", ascending=False).reset_index(drop=True)
+    return out
+
+
+def stat_leaders(df_stats: pd.DataFrame, roster_all: pd.DataFrame, league_key: Optional[str], stat_key: str, top_n: int = 10) -> pd.DataFrame:
+    if df_stats.empty or "stat_key" not in df_stats.columns:
+        return pd.DataFrame(columns=["player", "team", "total"])
+
+    df = df_stats.copy()
+    if "league_key" in df.columns:
+        df["league_key_norm"] = df["league_key"].apply(normalize_league_key)
+        if league_key:
+            df = df[df["league_key_norm"] == normalize_league_key(league_key)]
+
+    df = df[df["stat_key"] == stat_key].copy()
+    if df.empty:
+        return pd.DataFrame(columns=["player", "team", "total"])
+
+    df["value"] = pd.to_numeric(df.get("value"), errors="coerce").fillna(0)
+
+    agg = df.groupby(["player_id", "team_name"], dropna=False)["value"].sum().reset_index()
+    agg = agg.rename(columns={"value": "total"})
+
+    # merge in names from roster sheets
+    if not roster_all.empty and "player_id" in roster_all.columns:
+        roster_all = roster_all.copy()
+        roster_all["player_id"] = roster_all["player_id"].astype(str)
+        roster_all["player"] = (roster_all.get("first_name", "").astype(str).str.strip() + " " + roster_all.get("last_name", "").astype(str).str.strip()).str.strip()
+        lookup = roster_all[["player_id", "player"]].drop_duplicates()
+        agg["player_id"] = agg["player_id"].astype(str)
+        agg = agg.merge(lookup, on="player_id", how="left")
+    else:
+        agg["player"] = agg["player_id"].astype(str)
+
+    agg["player"] = agg["player"].fillna(agg["player_id"].astype(str))
+    agg["team_name"] = agg["team_name"].fillna("")
+    agg = agg.sort_values("total", ascending=False).head(top_n).reset_index(drop=True)
+    return agg[["player", "team_name", "total"]].rename(columns={"team_name": "team"})
 
 
 def page_display_board() -> None:
-    st.header("Display Board (TV Mode)")
-    st.caption("Foundation build: single board with options. We'll add full-screen routes next.")
-    league = st.selectbox("League to display", LEAGUE_KEYS, format_func=lambda k: LEAGUE_LABELS[k])
-    view = st.selectbox("Display", ["Standings", "Live Game Clock", "Highlights"])
+    st.header("Display Board")
+    st.caption("Big-screen mode for standings, stat leaders, and highlights.")
 
-    if view == "Standings":
-        page_standings(league)
-    elif view == "Live Game Clock":
-        if not supabase_ready():
-            st.error("Supabase not configured.")
+    if not sheets_ready():
+        st.warning("Google Sheets not configured.")
+        return
+
+    mode = st.selectbox(
+        "Board mode",
+        [
+            "Standings (one league)",
+            "Standings (3 leagues + overall camp)",
+            "Stat Leaders",
+            "Highlights",
+        ],
+    )
+
+    games_df = df_from_ws("games")
+    stats_df = df_from_ws("stats")
+    highlights_df = df_from_ws("Highlights")
+
+    roster_all = pd.DataFrame()
+    try:
+        roster_all = pd.concat(
+            [df_from_ws("rosters_sophomore"), df_from_ws("rosters_junior"), df_from_ws("rosters_senior")],
+            ignore_index=True,
+        )
+    except Exception:
+        roster_all = pd.DataFrame()
+
+    if mode == "Standings (one league)":
+        league = st.selectbox("League", ["Sophomore", "Junior", "Senior"])
+        lk = league.lower()
+        table = standings_table(games_df, lk)
+        st.subheader(f"{league} Standings")
+        st.dataframe(table, use_container_width=True, hide_index=True)
+
+    elif mode == "Standings (3 leagues + overall camp)":
+        st.subheader("League Standings")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown("### Sophomore")
+            st.dataframe(standings_table(games_df, "sophomore"), use_container_width=True, hide_index=True)
+        with c2:
+            st.markdown("### Junior")
+            st.dataframe(standings_table(games_df, "junior"), use_container_width=True, hide_index=True)
+        with c3:
+            st.markdown("### Senior")
+            st.dataframe(standings_table(games_df, "senior"), use_container_width=True, hide_index=True)
+
+        st.markdown("### Entire Camp Standings (All Leagues Combined)")
+        st.dataframe(standings_table(games_df, None), use_container_width=True, hide_index=True)
+
+    elif mode == "Stat Leaders":
+        if stats_df.empty:
+            st.info("No stats yet.")
             return
-        games = sb_list_live_games(status="active", limit=30)
-        if not games:
-            st.info("No active games.")
+        if "stat_key" not in stats_df.columns:
+            st.error("Stats sheet missing 'stat_key' column.")
             return
-        pick = st.selectbox("Pick an active game", games, format_func=lambda g: f"{g.get('sport')} • {g.get('team_a1')} vs {g.get('team_b1')}")
-        inject_css()
-        scoreboard_widget(pick)
-        st.caption("Put this page in full-screen on the TV.")
-    else:
-        page_highlights()
 
+        league = st.selectbox("League", ["Sophomore", "Junior", "Senior", "All"])
+        lk = None if league == "All" else league.lower()
 
-# =========================
-# Main
-# =========================
+        stat_keys = sorted([s for s in stats_df["stat_key"].dropna().unique().tolist() if str(s).strip() != ""])
+        stat_key = st.selectbox("Stat", stat_keys) if stat_keys else None
+        top_n = st.slider("Top N", 5, 25, 10)
+
+        if not stat_key:
+            st.info("No stat keys found.")
+            return
+
+        out = stat_leaders(stats_df, roster_all, lk, stat_key, top_n=top_n)
+        st.subheader(f"{stat_key} Leaders — {league}")
+        st.dataframe(out, use_container_width=True, hide_index=True)
+
+    else:  # Highlights
+        st.subheader("Highlights")
+        if highlights_df.empty:
+            st.info("No highlights posted yet.")
+            return
+        # sort newest first if possible
+        if "uploaded_at" in highlights_df.columns:
+            highlights_df = highlights_df.sort_values("uploaded_at", ascending=False)
+        show = highlights_df.head(25)
+        st.dataframe(show, use_container_width=True, hide_index=True)
 def main() -> None:
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     inject_css()
