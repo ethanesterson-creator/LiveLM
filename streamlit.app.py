@@ -30,7 +30,7 @@ ET = pytz.timezone("America/New_York")
 APP_TITLE = "Bauercrest League Manager"
 
 LOGO_PATH = "logo-header-2.png"  # optional
-BC_BG = "#F6F7FB"
+BC_BG = "#000000"
 BC_PRIMARY = "#0B1E3B"
 BC_ACCENT = "#C9A227"
 
