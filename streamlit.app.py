@@ -750,7 +750,9 @@ def page_setup(current_league: str) -> None:
             required = {"player_id", "first_name", "last_name", "team_name", "bunk"}
             missing = required - set(new_df.columns)
 
-def page_live_games_home():
+def page_live_games_home(current_league: str | None = None):
+    if current_league is None:
+        current_league = st.session_state.get('league_key') or ''
     st.header("Live Games (Create / Open)")
     if not current_league:
         st.warning("Pick a league first (sidebar).")
