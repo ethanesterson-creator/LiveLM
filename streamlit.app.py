@@ -292,7 +292,7 @@ def get_gspread_client():
 
 
 def sheets_ready() -> bool:
-    return get_gspread_client() is not None and ("sheet_id" in st.secrets or "SPREADSHEET_ID" in st.secrets)
+    return get_gspread_client() is not None and "sheet_id" in st.secrets
 
 
 def canonical_ws_name(name: str) -> str:
@@ -311,16 +311,24 @@ def canonical_ws_name(name: str) -> str:
     return mapping.get(name, name)
 
 
+
+def get_sheet_id() -> str:
+    """Accept both legacy and current secret key names."""
+    sid = st.secrets.get("sheet_id") or st.secrets.get("SPREADSHEET_ID") or st.secrets.get("spreadsheet_id")
+    if not sid:
+        raise RuntimeError("Google Sheet ID not found in secrets (expected sheet_id or SPREADSHEET_ID).")
+    return sid
+
+
 def ws(name: str):
     gc = get_gspread_client()
     if gc is None:
         raise RuntimeError("Google Sheets not configured.")
-    sh = gc.open_by_key(st.secrets.get("sheet_id") or st.secrets.get("SPREADSHEET_ID"))
+    sh = gc.open_by_key(get_sheet_id())
     cname = canonical_ws_name(name)
     try:
         return sh.worksheet(cname)
     except Exception:
-        # try a couple of common fallbacks (case differences)
         for alt in {cname.title(), cname.upper(), cname.lower()}:
             try:
                 return sh.worksheet(alt)
@@ -329,7 +337,9 @@ def ws(name: str):
         raise
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def df_from_ws(name: str) -> pd.DataFrame:
+    """Read a worksheet into a DataFrame (cached briefly to avoid Sheets quota)."""
     w = ws(name)
     values = w.get_all_values()
     if not values:
@@ -369,24 +379,22 @@ def supabase_ready() -> bool:
 
 
 def sb_upsert_live_game(game_id: str, payload: dict) -> None:
+    """Upsert a live_games row."""
     sb = get_supabase()
     if sb is None:
         raise RuntimeError("Supabase not configured.")
     payload = dict(payload or {})
     payload["id"] = game_id
-    # Upsert keeps this safe if row doesn't exist yet
-    sb.table("live_games").upsert(payload).execute()
+    sb.table("live_games").upsert(payload, on_conflict="id").execute()
 
 
 def sb_update_live_game(game_id: str, payload: dict):
-    """Update an existing live_games row."""
     sb = get_supabase()
     if sb is None:
         raise RuntimeError("Supabase not configured.")
     payload = dict(payload or {})
-    # Don't try to update the PK, just target by it
+    payload.pop("id", None)
     return sb.table("live_games").update(payload).eq("id", game_id).execute()
-
 
 
 def sb_create_live_game(payload: dict) -> str:
@@ -790,6 +798,7 @@ def page_live_games_home(current_league: str) -> None:
             "duration_seconds": int(duration_seconds),
             "timer_running": bool(timer_running_default),
             "timer_anchor_ts": None,
+            "timer_remaining_at_anchor": int(duration_seconds),
             "timer_remaining_seconds": int(duration_seconds),
             "clock_style": "running" if "Running" in running_style else "nonrunning",
             "status": "active",
@@ -838,6 +847,11 @@ def page_run_live_game(current_league: str) -> None:
         st.warning("This game is not active.")
     inject_css()
     scoreboard_widget(game)
+
+     if not gid:
+        st.error("No live game selected. Go to Live Games (Create/Open) and open one first.")
+        st.stop()    
+    
     # ---- Controls row
     c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
     with c1:
@@ -987,11 +1001,7 @@ def page_standings(current_league: str) -> None:
         return
 
     # Filter to selected league
-    if "league_key" in df.columns:
-        df["league_key_norm"] = df["league_key"].astype(str).apply(normalize_league_key)
-        df = df[df["league_key_norm"] == normalize_league_key(current_league)].copy()
-    else:
-        df = df.copy()
+    df = df[df.get("league_key", "") == current_league].copy()
     if df.empty:
         st.info("No games yet for this league.")
         return
