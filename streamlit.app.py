@@ -184,6 +184,19 @@ def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def parse_notes(notes: str) -> dict:
+    try:
+        obj = json.loads(notes) if notes else {}
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        return {}
+
+def build_notes(notes: str, lineup_player_ids: List[str]) -> str:
+    obj = parse_notes(notes)
+    obj["lineup_player_ids"] = lineup_player_ids
+    return json.dumps(obj)
+
+
 def fmt_clock(seconds: int) -> str:
     if seconds < 0:
         seconds = 0
@@ -311,24 +324,16 @@ def canonical_ws_name(name: str) -> str:
     return mapping.get(name, name)
 
 
-
-def get_sheet_id() -> str:
-    """Accept both legacy and current secret key names."""
-    sid = st.secrets.get("sheet_id") or st.secrets.get("SPREADSHEET_ID") or st.secrets.get("spreadsheet_id")
-    if not sid:
-        raise RuntimeError("Google Sheet ID not found in secrets (expected sheet_id or SPREADSHEET_ID).")
-    return sid
-
-
 def ws(name: str):
     gc = get_gspread_client()
     if gc is None:
         raise RuntimeError("Google Sheets not configured.")
-    sh = gc.open_by_key(get_sheet_id())
+    sh = gc.open_by_key(st.secrets["sheet_id"])
     cname = canonical_ws_name(name)
     try:
         return sh.worksheet(cname)
     except Exception:
+        # try a couple of common fallbacks (case differences)
         for alt in {cname.title(), cname.upper(), cname.lower()}:
             try:
                 return sh.worksheet(alt)
@@ -337,9 +342,14 @@ def ws(name: str):
         raise
 
 
+
 @st.cache_data(ttl=300, show_spinner=False)
 def df_from_ws(name: str) -> pd.DataFrame:
-    """Read a worksheet into a DataFrame (cached briefly to avoid Sheets quota)."""
+    """Read a worksheet into a DataFrame.
+
+    Cached to avoid hammering the Google Sheets API (prevents 429 quota errors).
+    TTL=5 minutes is plenty for rosters/standings during league.
+    """
     w = ws(name)
     values = w.get_all_values()
     if not values:
@@ -353,11 +363,20 @@ def overwrite_ws(name: str, df: pd.DataFrame) -> None:
     w = ws(name)
     w.clear()
     w.update([df.columns.tolist()] + df.astype(str).fillna("").values.tolist())
+    try:
+        df_from_ws.clear()  # type: ignore[attr-defined]
+    except Exception:
+        pass
 
 
 def append_ws(name: str, row: List) -> None:
     w = ws(name)
     w.append_row([str(x) if x is not None else "" for x in row])
+    try:
+        df_from_ws.clear()  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
 
 
 # =========================
@@ -378,24 +397,31 @@ def supabase_ready() -> bool:
     return get_supabase() is not None
 
 
+
 def sb_upsert_live_game(game_id: str, payload: dict) -> None:
-    """Upsert a live_games row."""
+    """Upsert a live_games row. This must EXECUTE (older versions of this file were incomplete)."""
     sb = get_supabase()
     if sb is None:
         raise RuntimeError("Supabase not configured.")
     payload = dict(payload or {})
     payload["id"] = game_id
-    sb.table("live_games").upsert(payload, on_conflict="id").execute()
+    sb.table("live_games").upsert(payload).execute()
 
 
 def sb_update_live_game(game_id: str, payload: dict):
+    """Update ONLY. If the row doesn't exist, Supabase will return empty; we treat that as an error."""
     sb = get_supabase()
     if sb is None:
         raise RuntimeError("Supabase not configured.")
     payload = dict(payload or {})
-    payload.pop("id", None)
-    return sb.table("live_games").update(payload).eq("id", game_id).execute()
-
+    resp = sb.table("live_games").update(payload).eq("id", game_id).execute()
+    try:
+        data = resp.data
+    except Exception:
+        data = None
+    if not data:
+        raise RuntimeError("Update failed (game not found).")
+    return data[0]
 
 def sb_create_live_game(payload: dict) -> str:
     sb = get_supabase()
@@ -723,107 +749,109 @@ def page_setup(current_league: str) -> None:
             new_df = pd.read_csv(up)
             required = {"player_id", "first_name", "last_name", "team_name", "bunk"}
             missing = required - set(new_df.columns)
-            if missing:
-                st.error(f"Missing columns: {', '.join(sorted(missing))}")
-            else:
-                overwrite_ws(sheet_name, new_df[["player_id", "first_name", "last_name", "team_name", "bunk"]])
-                st.success("Roster updated.")
 
-    st.markdown("**Current roster**")
-    st.dataframe(df, use_container_width=True)
-
-
-def page_live_games_home(current_league: str) -> None:
+def page_live_games_home():
     st.header("Live Games (Create / Open)")
-    if not supabase_ready():
-        st.error("Supabase not configured. Add `supabase_url` and `supabase_anon_key` to Streamlit secrets.")
+    if not current_league:
+        st.warning("Pick a league first (sidebar).")
         return
 
-    st.subheader("Create a new live game")
     roster = roster_df(current_league)
-    teams = teams_in_roster(roster)
-    if not teams:
-        st.info("Upload a roster in Setup first (so we know team names).")
-        teams = ["Team 1", "Team 2", "Team 3", "Team 4"]
+    if roster.empty:
+        st.error("Roster sheet is empty / missing.")
+        return
 
-    c1, c2, c3 = st.columns(3)
+    # Normalize roster columns
+    roster = roster.copy()
+    roster["player_id"] = roster["player_id"].astype(str).str.strip()
+    roster["team_name"] = roster["team_name"].astype(str).str.strip()
+
+    sport = st.selectbox("Sport", options=["Basketball", "Softball"], index=0)
+    level = st.selectbox("Level", options=["sophomores", "juniors", "seniors"], index=0)
+    mode = st.selectbox("Mode", options=["1v1", "2v2"], index=0)
+
+    teams = sorted([t for t in roster["team_name"].unique().tolist() if t])
+
+    c1, c2 = st.columns(2)
     with c1:
-        sport = st.selectbox("Sport", SPORTS, index=0)
+        team_a1 = st.selectbox("Left team A1", options=teams, index=0 if teams else None)
+        team_a2 = st.selectbox("Left team A2 (only for 2v2)", options=[""] + teams, index=0)
     with c2:
-        level = st.selectbox("Level", LEVELS, index=0)
-    with c3:
-        mode_key = st.selectbox("Mode", [m[0] for m in GAME_MODES], format_func=lambda x: dict(GAME_MODES)[x])
+        team_b1 = st.selectbox("Right team B1", options=teams, index=0 if teams else None)
+        team_b2 = st.selectbox("Right team B2 (only for 2v2)", options=[""] + teams, index=0)
 
-    presets = SPORT_TIMER_PRESETS.get(sport, [(20 * 60 * 2, "Default 40:00")])
-    duration_seconds = st.selectbox(
-        "Timer preset",
-        [p[0] for p in presets],
-        format_func=lambda v: dict(presets)[v],
-    )
-    running_style = st.radio("Clock style", ["Non-running (stops on whistles)", "Running"], horizontal=True)
-    timer_running_default = False
+    if mode == "1v1":
+        team_a2 = ""
+        team_b2 = ""
 
-    st.markdown("---")
-    if mode_key == "1v1":
-        t1, t2 = st.columns(2)
-        with t1:
-            team_a1 = st.selectbox("Team A", teams, key="team_a1")
-        with t2:
-            team_b1 = st.selectbox("Team B", teams, key="team_b1")
-        team_a2 = None
-        team_b2 = None
-    else:
-        st.caption("Pick 2 teams to combine on each side.")
-        col = st.columns(4)
-        team_a1 = col[0].selectbox("A1", teams, key="team_a1_2v2")
-        team_a2 = col[1].selectbox("A2", teams, key="team_a2_2v2")
-        team_b1 = col[2].selectbox("B1", teams, key="team_b1_2v2")
-        team_b2 = col[3].selectbox("B2", teams, key="team_b2_2v2")
+    # Lineup selection
+    st.caption("Pick who is playing (optional but recommended). This makes the in-game stat buttons super fast.")
+    player_opts = []
+    pid_by_label = {}
+    for r in roster.to_dict("records"):
+        pid = str(r.get("player_id","")).strip()
+        if not pid:
+            continue
+        name = f"{str(r.get('first_name','')).strip()} {str(r.get('last_name','')).strip()}".strip() or pid
+        team = str(r.get("team_name","")).strip()
+        lab = f"{name} ({team})" if team else name
+        if lab in pid_by_label:
+            lab = f"{lab} [{pid[:6]}]"
+        pid_by_label[lab] = pid
+        player_opts.append(lab)
+
+    lineup_labels = st.multiselect("Players playing", options=player_opts, default=[])
 
     notes = st.text_input("Notes (optional)", value="")
+
     if st.button("Create Live Game", type="primary"):
+        lineup_ids = [pid_by_label.get(l) for l in lineup_labels]
+        lineup_ids = [p for p in lineup_ids if p]
+        notes_json = build_notes(notes, lineup_ids) if lineup_ids else notes
+
         payload = {
-            "created_at": now_utc().isoformat(),
-            "updated_at": now_utc().isoformat(),
             "league_key": current_league,
             "sport": sport,
             "level": level,
-            "mode": mode_key,
+            "mode": mode,
             "team_a1": team_a1,
-            "team_a2": team_a2,
+            "team_a2": team_a2 or None,
             "team_b1": team_b1,
-            "team_b2": team_b2,
+            "team_b2": team_b2 or None,
             "score_a": 0,
             "score_b": 0,
-            "duration_seconds": int(duration_seconds),
-            "timer_running": bool(timer_running_default),
+            "duration_seconds": 1800 if sport.lower() == "basketball" else 3600,
+            "timer_running": False,
             "timer_anchor_ts": None,
-            "timer_remaining_at_anchor": int(duration_seconds),
-            "timer_remaining_seconds": int(duration_seconds),
-            "clock_style": "running" if "Running" in running_style else "nonrunning",
+            "timer_remaining_seconds": 1800 if sport.lower() == "basketball" else 3600,
+            "clock_style": "nonnunning",
             "status": "active",
-            "notes": notes,
+            "notes": notes_json or None,
+            "created_at": now_utc().isoformat(),
+            "updated_at": now_utc().isoformat(),
         }
         gid = sb_create_live_game(payload)
+        st.success("Game created.")
         st.session_state["active_game_id"] = gid
-        st.success("Created. Opening game…")
         st.rerun()
 
     st.markdown("---")
     st.subheader("Open an existing live game")
-    games = sb_list_live_games(status="active", limit=50)
+    games = sb_list_live_games(current_league)
     if not games:
-        st.info("No active live games yet.")
+        st.info("No active games yet.")
         return
 
-    def label(g):
-        a = g.get("team_a1","A")
-        b = g.get("team_b1","B")
-        return f"{g.get('sport')} {g.get('level')} • {LEAGUE_LABELS.get(g.get('league_key'), g.get('league_key'))} • {a} vs {b} • {g.get('created_at','')[:19]}"
+    options = []
+    id_by_label = {}
+    for g in games:
+        lab = f"{g['id'][:8]} — {g.get('sport','')} {g.get('level','')} {g.get('mode','')} | {g.get('team_a1','')} vs {g.get('team_b1','')} | {g.get('status','')}"
+        options.append(lab)
+        id_by_label[lab] = g["id"]
 
-    pick = st.selectbox("Active games", games, format_func=label)
-    if st.button("Open selected game"):
-        st.session_state["active_game_id"] = pick["id"]
+    chosen = st.selectbox("Select a game", options=options)
+    if st.button("Open game"):
+        st.session_state["active_game_id"] = id_by_label[chosen]
         st.rerun()
 
 
@@ -848,11 +876,7 @@ def page_run_live_game(current_league: str) -> None:
     inject_css()
     scoreboard_widget(game)
 
-     if not gid:
-        st.error("No live game selected. Go to Live Games (Create/Open) and open one first.")
-        st.stop()    
-    
-    # ---- Controls row
+# ---- Controls row
     c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
     with c1:
         if st.button("▶ Start", use_container_width=True):
@@ -914,40 +938,159 @@ def page_run_live_game(current_league: str) -> None:
     teams_in_game = [t for t in teams_in_game if t]
 
     st.caption("Active lineup: pick who is actually playing (so you don't see the entire league).")
-    lineup_default = st.session_state.get("lineup_players", [])
-    all_players = roster[roster["team_name"].isin(teams_in_game)].copy()
-    all_players["label"] = all_players.apply(player_label, axis=1)
-    options = all_players["label"].tolist()
+    # --- Lineup (who is playing) ---
+    notes_obj = parse_notes(str(game.get("notes","")))
+    saved_lineup = notes_obj.get("lineup_player_ids") or []
+    if isinstance(saved_lineup, str):
+        saved_lineup = [p.strip() for p in saved_lineup.split(",") if p.strip()]
 
-    lineup = st.multiselect(
-        "Players in this game",
-        options=options,
-        default=[x for x in lineup_default if x in options],
-        key="lineup_select",
-    )
-    st.session_state["lineup_players"] = lineup
+    # Build quick lookup for roster
+    roster = roster.copy()
+    roster["player_id"] = roster["player_id"].astype(str).str.strip()
+    roster = roster[roster["player_id"] != ""]
+    roster_by_id = {r["player_id"]: r for r in roster.to_dict("records")}
 
-    # map label -> row
-    by_label = {row["label"]: row for _, row in all_players.iterrows()}
+    # Default lineup = saved lineup if present, else empty (counselor can set it)
+    lineup_ids = [pid for pid in saved_lineup if pid in roster_by_id]
 
-    stat_keys = SPORT_STATS.get(sport, ["PTS"])
-    if not lineup:
-        st.info("Select players in the lineup to show stat buttons.")
+    with st.expander("Who’s playing? (set once, then you’re good)", expanded=(len(lineup_ids) == 0)):
+        opts = []
+        label_to_pid = {}
+        for r in roster.to_dict("records"):
+            pid = r["player_id"]
+            name = f"{str(r.get('first_name','')).strip()} {str(r.get('last_name','')).strip()}".strip()
+            team = str(r.get("team_name","")).strip()
+            lab = f"{name} ({team})" if team else name
+            if lab in label_to_pid:
+                lab = f"{lab} [{pid[:6]}]"
+            label_to_pid[lab] = pid
+            opts.append(lab)
+
+        default_labels = []
+        for pid in lineup_ids:
+            r = roster_by_id.get(pid, {})
+            name = f"{str(r.get('first_name','')).strip()} {str(r.get('last_name','')).strip()}".strip()
+            team = str(r.get("team_name","")).strip()
+            lab = f"{name} ({team})" if team else name
+            # handle possible de-dupe labels
+            if lab not in label_to_pid:
+                for k, v in label_to_pid.items():
+                    if v == pid:
+                        lab = k
+                        break
+            if lab in label_to_pid:
+                default_labels.append(lab)
+
+        picked_labels = st.multiselect("Players playing", options=opts, default=default_labels, key=f"lineup_labels_{gid}")
+        if st.button("Save lineup", key=f"save_lineup_{gid}"):
+            picked_ids = [label_to_pid.get(l) for l in picked_labels]
+            picked_ids = [p for p in picked_ids if p]
+            notes_json = build_notes(str(game.get("notes","")), picked_ids)
+            sb_update_live_game(gid, {"notes": notes_json, "updated_at": now_utc().isoformat()})
+            st.success("Lineup saved.")
+            st.rerun()
+
+    # Re-load after possible save
+    notes_obj = parse_notes(str(game.get("notes","")))
+    saved_lineup = notes_obj.get("lineup_player_ids") or []
+    if isinstance(saved_lineup, str):
+        saved_lineup = [p.strip() for p in saved_lineup.split(",") if p.strip()]
+    lineup_ids = [pid for pid in saved_lineup if pid in roster_by_id]
+
+    if not lineup_ids:
+        st.info("Set the lineup above to unlock the fast tap stat buttons.")
     else:
-        # quick stat UI: each player gets a row of buttons
-        for lab in lineup:
-            row = by_label[lab]
-            pid = str(row["player_id"])
-            tname = str(row["team_name"])
-            cols = st.columns([3] + [1] * len(stat_keys))
-            cols[0].write(f"**{lab}**")
-            for i, sk in enumerate(stat_keys):
-                if cols[i + 1].button(sk, key=f"stat_{pid}_{sk}"):
-                    add_stat(gid, pid, tname, sk, 1)
-                    st.toast(f"{sk} +1 for {lab}", icon="✅")
+        st.markdown("### Quick stats (tap fast)")
+
+        auto_score = st.toggle("Auto-add to team score when you tap a player PTS button", value=True, key=f"auto_score_{gid}")
+
+        # Helper for rendering player rows
+        def _render_player_row(pid: str, side: str):
+            r = roster_by_id.get(pid, {})
+            name = f"{str(r.get('first_name','')).strip()} {str(r.get('last_name','')).strip()}".strip()
+            if not name:
+                name = pid
+            cols = st.columns([3,1,1,1,1,1,1,1,1], gap="small") if sport.lower()=="basketball" else st.columns([3,1,1,1], gap="small")
+
+            cols[0].markdown(f"**{name}**")
+            if sport.lower() == "basketball":
+                if cols[1].button("+1", key=f"{gid}_{pid}_p1"):
+                    add_stat(gid, current_league, sport, level, pid, str(r.get('team_name','')), "pts", 1)
+                    if auto_score: update_score(gid, side, 1, current_league, sport, level)
+                    st.rerun()
+                if cols[2].button("+2", key=f"{gid}_{pid}_p2"):
+                    add_stat(gid, current_league, sport, level, pid, str(r.get('team_name','')), "pts", 2)
+                    if auto_score: update_score(gid, side, 2, current_league, sport, level)
+                    st.rerun()
+                if cols[3].button("+3", key=f"{gid}_{pid}_p3"):
+                    add_stat(gid, current_league, sport, level, pid, str(r.get('team_name','')), "pts", 3)
+                    if auto_score: update_score(gid, side, 3, current_league, sport, level)
+                    st.rerun()
+                if cols[4].button("+Ast", key=f"{gid}_{pid}_ast"):
+                    add_stat(gid, current_league, sport, level, pid, str(r.get('team_name','')), "ast", 1)
+                    st.rerun()
+                if cols[5].button("+Reb", key=f"{gid}_{pid}_reb"):
+                    add_stat(gid, current_league, sport, level, pid, str(r.get('team_name','')), "reb", 1)
+                    st.rerun()
+                if cols[6].button("+Stl", key=f"{gid}_{pid}_stl"):
+                    add_stat(gid, current_league, sport, level, pid, str(r.get('team_name','')), "stl", 1)
+                    st.rerun()
+                if cols[7].button("+Blk", key=f"{gid}_{pid}_blk"):
+                    add_stat(gid, current_league, sport, level, pid, str(r.get('team_name','')), "blk", 1)
+                    st.rerun()
+                if cols[8].button("+TO", key=f"{gid}_{pid}_to"):
+                    add_stat(gid, current_league, sport, level, pid, str(r.get('team_name','')), "to", 1)
+                    st.rerun()
+            else:
+                # Softball (simple)
+                if cols[1].button("+Hit", key=f"{gid}_{pid}_hit"):
+                    add_stat(gid, current_league, sport, level, pid, str(r.get('team_name','')), "hit", 1)
+                    st.rerun()
+                if cols[2].button("+Run", key=f"{gid}_{pid}_run"):
+                    add_stat(gid, current_league, sport, level, pid, str(r.get('team_name','')), "run", 1)
+                    if auto_score: update_score(gid, side, 1, current_league, sport, level)
+                    st.rerun()
+                if cols[3].button("+RBI", key=f"{gid}_{pid}_rbi"):
+                    add_stat(gid, current_league, sport, level, pid, str(r.get('team_name','')), "rbi", 1)
                     st.rerun()
 
-    # ---- Live stat table (updates on every press because we rerun)
+        # Split lineup by which side they belong to (match team names in game config)
+        team_a_names = [t for t in [team_a1, team_a2] if t]
+        team_b_names = [t for t in [team_b1, team_b2] if t]
+
+        a_ids = []
+        b_ids = []
+        for pid in lineup_ids:
+            tname = str(roster_by_id.get(pid, {}).get("team_name","")).strip()
+            if tname in team_a_names:
+                a_ids.append(pid)
+            elif tname in team_b_names:
+                b_ids.append(pid)
+            else:
+                # If team doesn't match, default to A so player isn't lost
+                a_ids.append(pid)
+
+        cA, cB = st.columns(2, gap="large")
+        with cA:
+            st.markdown(f"#### Left (A): {' / '.join(team_a_names) if team_a_names else 'Team A'}")
+            s1, s2, s3 = st.columns(3, gap="small")
+            if s1.button("+1 Team", key=f"{gid}_A_plus1"): update_score(gid, "A", 1, current_league, sport, level); st.rerun()
+            if s2.button("+2 Team", key=f"{gid}_A_plus2"): update_score(gid, "A", 2, current_league, sport, level); st.rerun()
+            if s3.button("+3 Team", key=f"{gid}_A_plus3"): update_score(gid, "A", 3, current_league, sport, level); st.rerun()
+            st.markdown("---")
+            for pid in a_ids:
+                _render_player_row(pid, "A")
+
+        with cB:
+            st.markdown(f"#### Right (B): {' / '.join(team_b_names) if team_b_names else 'Team B'}")
+            s1, s2, s3 = st.columns(3, gap="small")
+            if s1.button("+1 Team", key=f"{gid}_B_plus1"): update_score(gid, "B", 1, current_league, sport, level); st.rerun()
+            if s2.button("+2 Team", key=f"{gid}_B_plus2"): update_score(gid, "B", 2, current_league, sport, level); st.rerun()
+            if s3.button("+3 Team", key=f"{gid}_B_plus3"): update_score(gid, "B", 3, current_league, sport, level); st.rerun()
+            st.markdown("---")
+            for pid in b_ids:
+                _render_player_row(pid, "B")
+
     st.markdown("---")
     st.subheader("This game: live stat totals")
     events = sb_list_events(gid)
