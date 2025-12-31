@@ -292,7 +292,7 @@ def get_gspread_client():
 
 
 def sheets_ready() -> bool:
-    return get_gspread_client() is not None and "sheet_id" in st.secrets
+    return get_gspread_client() is not None and ("sheet_id" in st.secrets or "SPREADSHEET_ID" in st.secrets)
 
 
 def canonical_ws_name(name: str) -> str:
@@ -315,7 +315,7 @@ def ws(name: str):
     gc = get_gspread_client()
     if gc is None:
         raise RuntimeError("Google Sheets not configured.")
-    sh = gc.open_by_key(st.secrets["sheet_id"])
+    sh = gc.open_by_key(st.secrets.get("sheet_id") or st.secrets.get("SPREADSHEET_ID"))
     cname = canonical_ws_name(name)
     try:
         return sh.worksheet(cname)
@@ -372,14 +372,21 @@ def sb_upsert_live_game(game_id: str, payload: dict) -> None:
     sb = get_supabase()
     if sb is None:
         raise RuntimeError("Supabase not configured.")
-    payload = dict(payload)
-    payload["id"] = game_id
-
-def sb_update_live_game(game_id: str, payload: dict):
-    # Update ONLY. If the row doesn't exist, it should error clearly.
     payload = dict(payload or {})
     payload["id"] = game_id
+    # Upsert keeps this safe if row doesn't exist yet
+    sb.table("live_games").upsert(payload).execute()
+
+
+def sb_update_live_game(game_id: str, payload: dict):
+    """Update an existing live_games row."""
+    sb = get_supabase()
+    if sb is None:
+        raise RuntimeError("Supabase not configured.")
+    payload = dict(payload or {})
+    # Don't try to update the PK, just target by it
     return sb.table("live_games").update(payload).eq("id", game_id).execute()
+
 
 
 def sb_create_live_game(payload: dict) -> str:
@@ -831,11 +838,6 @@ def page_run_live_game(current_league: str) -> None:
         st.warning("This game is not active.")
     inject_css()
     scoreboard_widget(game)
-
-     if not gid:
-        st.error("No live game selected. Go to Live Games (Create/Open) and open one first.")
-        st.stop()    
-    
     # ---- Controls row
     c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
     with c1:
@@ -985,7 +987,11 @@ def page_standings(current_league: str) -> None:
         return
 
     # Filter to selected league
-    df = df[df.get("league_key", "") == current_league].copy()
+    if "league_key" in df.columns:
+        df["league_key_norm"] = df["league_key"].astype(str).apply(normalize_league_key)
+        df = df[df["league_key_norm"] == normalize_league_key(current_league)].copy()
+    else:
+        df = df.copy()
     if df.empty:
         st.info("No games yet for this league.")
         return
